@@ -1,0 +1,834 @@
+---
+title: "Used Car Price Prediction (Ridge → CatBoost → Keras Neural Network)"
+author: "Erin Weiss"
+format:
+  html:
+    toc: true
+    toc-depth: 3
+    code-fold: true
+    code-tools: true
+    theme: cosmo
+execute:
+  echo: true
+  warning: false
+  message: false
+---
+
+## Project Setup
+
+This report runs **locally** (not Colab). It uses:
+
+- **Portable paths** (no hard-coded `/content/` paths)
+- **Kaggle CLI** to download the dataset once
+- **Checkpoint saves** after each stage (cleaned data, engineered features, trained models)
+
+> Folder structure assumed:
+>
+> - `data/raw/`
+> - `data/processed/`
+> - `models/`
+> - `reports/`
+
+```{python}
+from pathlib import Path
+import os, json, re
+import numpy as np
+import pandas as pd
+
+import matplotlib.pyplot as plt
+import seaborn as sns
+import matplotlib.ticker as mtick
+
+from sklearn.model_selection import train_test_split, KFold, GridSearchCV
+from sklearn.compose import ColumnTransformer
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import OneHotEncoder, StandardScaler
+from sklearn.impute import SimpleImputer
+from sklearn.linear_model import Ridge
+from sklearn.metrics import mean_absolute_error, mean_squared_error
+
+from catboost import CatBoostRegressor
+import joblib
+
+# --- Portable project paths ---
+PROJECT_ROOT = Path.cwd().resolve()
+# If you render from the project root, this is correct.
+# If you render from inside /notebooks, uncomment the next line:
+# PROJECT_ROOT = Path.cwd().resolve().parents[0]
+
+DATA_DIR = PROJECT_ROOT / "data"
+RAW_DIR = DATA_DIR / "raw"
+PROCESSED_DIR = DATA_DIR / "processed"
+MODEL_DIR = PROJECT_ROOT / "models"
+
+for d in [RAW_DIR, PROCESSED_DIR, MODEL_DIR]:
+    d.mkdir(parents=True, exist_ok=True)
+
+RAW_CSV = RAW_DIR / "cars.csv"
+CLEAN_PARQUET = PROCESSED_DIR / "cars_cleaned.parquet"
+FEATURES_PARQUET = PROCESSED_DIR / "cars_features.parquet"
+
+def load_or_build(path: Path, build_fn, *, label: str):
+    """
+    If `path` exists, load it. Otherwise run build_fn() and save.
+    build_fn must return a DataFrame.
+    """
+    if path.exists():
+        print(f"Loading {label} from checkpoint: {path}")
+        return pd.read_parquet(path)
+
+    print(f"Building {label} (checkpoint not found): {path}")
+    df_out = build_fn()
+    df_out.to_parquet(path, index=False)
+    print(f"Saved {label} checkpoint → {path}")
+    return df_out
+
+
+RIDGE_PATH = MODEL_DIR / "ridge_pipeline.joblib"
+CATBOOST_PATH = MODEL_DIR / "catboost_final.cbm"
+CATBOOST_PARAMS_PATH = MODEL_DIR / "catboost_best_params.json"
+FEATURE_COLS_PATH = MODEL_DIR / "feature_columns.json"
+METRICS_PATH = MODEL_DIR / "metrics.json"
+
+PROJECT_ROOT, RAW_CSV
+```
+
+```{python}
+def build_cleaned_df():
+    df_local = pd.read_csv(RAW_CSV)
+
+    df_cleaned = df_local.copy()
+
+    mpg_split = df_cleaned["mpg"].astype(str).str.split("-", expand=True)
+    df_cleaned["mpg_avg"] = (
+        mpg_split
+        .apply(pd.to_numeric, errors="coerce")
+        .mean(axis=1)
+    )
+    df_cleaned = df_cleaned.drop(columns="mpg")
+
+    df_cleaned = df_cleaned.dropna().reset_index(drop=True)
+
+    bin_cols = ["accidents_or_damage", "one_owner", "personal_use_only"]
+    for c in bin_cols:
+        if c in df_cleaned.columns:
+            df_cleaned[c] = df_cleaned[c].round().astype("Int64")
+
+    return df_cleaned
+
+df_cleaned = load_or_build(CLEAN_PARQUET, build_cleaned_df, label="cleaned dataset")
+df_cleaned.head()
+
+```
+
+```{python}
+df_cleaned.isnull().sum()
+```
+
+```{python}
+df_cleaned.to_parquet(CLEAN_PARQUET, index=False)
+print("Saved:", CLEAN_PARQUET)
+
+```
+
+## EDA
+
+```{python}
+summary = (
+    df_cleaned
+    .nunique()
+    .rename("n_unique")
+    .to_frame()
+    .join(df_cleaned.dtypes.rename("dtype"))
+    .sort_values("n_unique", ascending=False)
+)
+summary.head(20)
+```
+
+```{python}
+n_entries = len(df_cleaned)
+n_manu = df_cleaned["manufacturer"].nunique()
+n_model = df_cleaned[["manufacturer", "model"]].drop_duplicates().shape[0]
+n_engine = df_cleaned["engine"].nunique()
+year_min = df_cleaned["year"].min()
+year_max = df_cleaned["year"].max()
+most_year = int(df_cleaned["year"].value_counts().idxmax())
+
+print(f"Number of entries: {n_entries:,}")
+print(f"Unique manufacturers: {n_manu:,}")
+print(f"Unique make/models: {n_model:,}")
+print(f"Unique engine entries: {n_engine:,}")
+print(f"Oldest year: {year_min}, newest year: {year_max}")
+print(f"Most common year: {most_year}")
+```
+
+```{python}
+desc = df_cleaned["price"].describe()
+
+formatted = desc.astype(object)
+formatted.loc["count"] = f"{int(desc.loc['count']):,}"
+formatted.loc[formatted.index != "count"] = formatted.loc[formatted.index != "count"].map(lambda x: f"${x:,.2f}")
+formatted
+```
+
+```{python}
+fig, ax = plt.subplots(figsize=(8, 5))
+sns.histplot(df_cleaned["price"], bins=60, ax=ax)
+ax.xaxis.set_major_formatter(mtick.StrMethodFormatter("${x:,.0f}"))
+ax.set_title("Distribution of car price", fontsize=14)
+ax.set_xlabel("Price")
+plt.tight_layout()
+plt.show()
+```
+
+```{python}
+low, high = df_cleaned["price"].quantile([0.01, 0.99])
+price_filtered = df_cleaned["price"].clip(lower=low, upper=high)
+
+fig, ax = plt.subplots(figsize=(8, 5))
+sns.histplot(price_filtered, bins=60, ax=ax)
+ax.xaxis.set_major_formatter(mtick.StrMethodFormatter("${x:,.0f}"))
+ax.set_title("Price Distribution (Outliers Removed)", fontsize=14)
+ax.set_xlabel("Price")
+plt.tight_layout()
+plt.show()
+
+```
+
+```{python}
+order = df_cleaned["manufacturer"].value_counts(ascending=False).index
+plt.figure(figsize=(10, 5))
+sns.countplot(x="manufacturer", data=df_cleaned, order=order)
+plt.title("Distribution of car manufacturers", fontsize=14)
+plt.xticks(rotation=90)
+plt.tight_layout()
+plt.show()
+
+```
+
+```{python}
+plt.figure(figsize=(12, 5))
+sns.countplot(x="year", data=df_cleaned, hue="year", legend=False)
+plt.title("Distribution of car years", fontsize=14)
+plt.xticks(rotation=90)
+plt.tight_layout()
+plt.show()
+
+```
+
+```{python}
+df_models = (
+    df_cleaned.groupby("manufacturer")["model"]
+       .nunique()
+       .sort_values(ascending=False)
+       .reset_index(name="unique_model_count")
+)
+
+plt.figure(figsize=(10, 5))
+sns.barplot(data=df_models, x="manufacturer", y="unique_model_count")
+plt.xticks(rotation=90)
+plt.ylabel("Unique Model Count")
+plt.xlabel("Manufacturer")
+plt.title("Unique model count per manufacturer", fontsize=14)
+plt.tight_layout()
+plt.show()
+
+```
+
+```{python}
+plt.figure(figsize=(12, 5))
+sns.boxplot(data=df_cleaned, x="manufacturer", y="price")
+plt.title("Car Price Distribution by Manufacturer", fontsize=14)
+plt.xticks(rotation=90)
+plt.tight_layout()
+plt.show()
+
+```
+
+```{python}
+def filter_group(g):
+    low, high = g["price"].quantile([0.01, 0.99])
+    return g[g["price"].between(low, high)]
+
+df_cleaned_filtered = (
+    df_cleaned
+    .groupby("manufacturer", group_keys=False)[["manufacturer", "price"]]
+    .apply(filter_group)
+)
+
+order = (
+    df_cleaned_filtered
+    .groupby("manufacturer")["price"]
+    .median()
+    .sort_values(ascending=False)
+    .index
+)
+
+plt.figure(figsize=(12, 6))
+sns.boxplot(data=df_cleaned_filtered, x="manufacturer", y="price", order=order)
+plt.title("Car Price Distribution by Manufacturer (1–99% within each maker)", fontsize=14)
+plt.xticks(rotation=90)
+plt.tight_layout()
+plt.show()
+
+```
+
+## Feature Engineering (and save checkpoint)
+```{python}
+def build_features_df():
+    # start from cleaned df already in memory
+    y = np.log1p(df_cleaned["price"])
+    X = df_cleaned.drop(columns=["price", "seller_name"], errors="ignore").copy()
+
+    REFERENCE_YEAR = 2023
+
+    # age and mileage per year
+    X["age"] = REFERENCE_YEAR - X["year"]
+    X["age_for_mpy"] = X["age"].clip(lower=1)
+    X["mileage_per_year"] = X["mileage"] / X["age_for_mpy"]
+    X = X.drop(columns=["age_for_mpy", "year"])
+
+    def parse_engine(engine):
+        s = str(engine).strip().upper()
+
+        m_l = re.search(r"(\d(?:\.\d)?)\s*L\b", s)
+        liters = float(m_l.group(1)) if m_l else np.nan
+
+        m_c = re.search(r"\b([IVH])\s*[- ]?\s*(\d+)\b", s)
+        if m_c:
+            layout = m_c.group(1)
+            cylinders = int(m_c.group(2))
+        else:
+            layout = np.nan
+            cylinders = np.nan
+
+        turbo = int(("TURBO" in s) or ("TWIN TURBO" in s) or ("SUPERCHARG" in s))
+
+        hybrid = int(
+            ("HYBRID" in s) or
+            ("GAS/ELECTRIC" in s) or
+            ("PHEV" in s) or
+            ("PLUG-IN" in s) or
+            ("ELECTRIC" in s and "GAS" in s)
+        )
+
+        return pd.Series({
+            "engine_liters": liters,
+            "engine_cylinders": cylinders,
+            "engine_layout": layout,
+            "engine_turbo": turbo,
+            "engine_hybrid": hybrid
+        })
+
+    engine_features = X["engine"].apply(parse_engine)
+    X = pd.concat([X.drop(columns=["engine"]), engine_features], axis=1)
+    X["engine_layout"] = X["engine_layout"].fillna("unknown")
+
+    def normalize_transmission(t):
+        if pd.isna(t):
+            return "unknown"
+        t = str(t).lower().strip()
+        t = t.replace("a/t", "automatic")
+        t = t.replace("auto", "automatic")
+        return t
+
+    def transmission_type(t):
+        t = normalize_transmission(t)
+        if t == "unknown" or "not specified" in t:
+            return "unknown"
+        if "manual" in t:
+            return "manual"
+        if ("cvt" in t) or ("variable" in t) or ("ivt" in t) or ("ecvt" in t):
+            return "cvt"
+        return "automatic"
+
+    def transmission_gears(t):
+        t = normalize_transmission(t)
+        match = re.search(r"(\d+)[-\s]?speed", t)
+        return int(match.group(1)) if match else np.nan
+
+    X["transmission_clean"] = X["transmission"].apply(transmission_type)
+    X["transmission_gears"] = X["transmission"].apply(transmission_gears)
+    X = X.drop(columns=["transmission"])
+    X["transmission_gears_missing"] = X["transmission_gears"].isna().astype(int)
+
+    def base_color(c):
+        c = str(c).lower().strip()
+        if "black" in c or "ebony" in c:
+            return "black"
+        if "blue" in c or "deep cerulean" in c:
+            return "blue"
+        if "red" in c or "scarlet ember" in c or "maroon" in c or "dark cherry" in c:
+            return "red"
+        if "green" in c or "army green" in c or "f8 green" in c or "dark moss" in c or "sarge green clearcoat" in c:
+            return "green"
+        if "white" in c or "pearl" in c or "whiite" in c:
+            return "white"
+        if "gray" in c or "silver" in c or "grey" in c or "gun" in c or "steel" in c or "magnetic" in c or " metal " in c or "carbon" in c or "granite" in c or "graphite" in c:
+            return "gray"
+        return "other"
+
+    X["exterior_color_base"] = X["exterior_color"].apply(base_color)
+    X = X.drop(columns=["exterior_color"])
+
+    def interior_color_base(c):
+        c = str(c).lower().strip()
+        if "black" in c or "ebony" in c or "jet" in c:
+            return "black"
+        if "red" in c:
+            return "red"
+        if "gray" in c or "grey" in c or "graphite" in c or "charcoal" in c or "shale" in c or "steel" in c or "pewter" in c or "slate" in c:
+            return "gray"
+        if "brown" in c or "cappuccino" in c or "mocha" in c or "espresso" in c or "cocoa" in c or "coffee" in c or "nutmeg" in c or "walnut" in c or "chestnut" in c or "hazelnut" in c or "roast" in c:
+            return "brown"
+        if "beige" in c or "tan" in c or "taupe" in c or "sand" in c or "ash" in c or "camel" in c or "cognac" in c or "parchment" in c or "stone" in c or "wheat" in c or "sandstone" in c or "cement" in c or "almond" in c or "blond" in c or "neutral" in c:
+            return "beige"
+        if "white" in c or "ivory" in c or "cream" in c:
+            return "white"
+        return "other"
+
+    X["interior_color_base"] = X["interior_color"].apply(interior_color_base)
+    X = X.drop(columns=["interior_color"])
+
+    # casts (optional, keeps types stable)
+    numeric_casts = {
+        "age": "int64",
+        "mileage_per_year": "float64",
+        "engine_liters": "float64",
+        "engine_cylinders": "float64",
+        "transmission_gears": "float64",
+        "engine_turbo": "int64",
+        "engine_hybrid": "int64",
+        "transmission_gears_missing": "int64",
+    }
+    for col, dtype in numeric_casts.items():
+        if col in X.columns:
+            X[col] = X[col].astype(dtype)
+
+    for col in ["engine_layout", "transmission_clean", "exterior_color_base", "interior_color_base"]:
+        if col in X.columns:
+            X[col] = X[col].astype("object")
+
+    # Save BOTH X and y together so you can reload fast
+    features_df = X.copy()
+    features_df["target_log1p_price"] = y.values
+    return features_df
+
+features_df = load_or_build(FEATURES_PARQUET, build_features_df, label="feature table")
+
+# Split back out into X and y for modeling
+y = features_df["target_log1p_price"]
+X = features_df.drop(columns=["target_log1p_price"])
+
+```
+
+```{python}
+X.head()
+
+```
+
+```{python}
+X.isnull().sum().sort_values(ascending=False).head(15)
+
+```
+
+## Save features checkpoint
+```{python}
+# Save for fast reload later (no need to rerun all parsing)
+features_df = X.copy()
+features_df["target_log1p_price"] = y.values
+
+features_df.to_parquet(FEATURES_PARQUET, index=False)
+print("Saved:", FEATURES_PARQUET)
+
+```
+
+## Ridge Regression (Pipeline + Grid Search)
+```{python}
+if RIDGE_PATH.exists():
+    print(f"Loading Ridge model: {RIDGE_PATH}")
+    best_ridge = joblib.load(RIDGE_PATH)
+else:
+    print("Training Ridge (no saved model found)...")
+    # ... your existing ridge training code here ...
+    joblib.dump(best_ridge, RIDGE_PATH)
+    print(f"Saved Ridge model: {RIDGE_PATH}")
+
+```
+
+```{python}
+X_train, X_test, y_train, y_test = train_test_split(
+    X, y, test_size=0.2, random_state=42
+)
+
+num_cols = [
+    "mileage",
+    "mpg_avg",
+    "price_drop",
+    "seller_rating",
+    "driver_rating",
+    "driver_reviews_num",
+    "accidents_or_damage",
+    "one_owner",
+    "personal_use_only",
+    "age",
+    "mileage_per_year",
+    "engine_liters",
+    "engine_cylinders",
+    "engine_turbo",
+    "engine_hybrid",
+    "transmission_gears",
+    "transmission_gears_missing",
+]
+
+cat_cols = [
+    "manufacturer",
+    "model",
+    "drivetrain",
+    "fuel_type",
+    "engine_layout",
+    "transmission_clean",
+    "exterior_color_base",
+    "interior_color_base",
+]
+
+# Keep only columns that exist (defensive for dataset changes)
+num_cols = [c for c in num_cols if c in X_train.columns]
+cat_cols = [c for c in cat_cols if c in X_train.columns]
+num_cols, cat_cols[:5]
+
+```
+
+```{python}
+numeric_pipe = Pipeline(steps=[
+    ("imputer", SimpleImputer(strategy="median")),
+    ("scaler", StandardScaler())
+])
+
+categorical_pipe = Pipeline(steps=[
+    ("imputer", SimpleImputer(strategy="most_frequent")),
+    ("ohe", OneHotEncoder(handle_unknown="ignore", min_frequency=50, sparse_output=True))
+])
+
+preprocess = ColumnTransformer(
+    transformers=[
+        ("num", numeric_pipe, num_cols),
+        ("cat", categorical_pipe, cat_cols),
+    ],
+    remainder="drop"
+)
+
+ridge_model = Pipeline(steps=[
+    ("prep", preprocess),
+    ("ridge", Ridge(random_state=42)),
+])
+
+cv = KFold(n_splits=5, shuffle=True, random_state=42)
+param_grid = {"ridge__alpha": np.logspace(-3, 3, 13)}
+
+gs = GridSearchCV(
+    ridge_model,
+    param_grid=param_grid,
+    scoring="neg_root_mean_squared_error",
+    cv=cv,
+    n_jobs=-1,
+    verbose=1
+)
+
+gs.fit(X_train, y_train)
+
+best_ridge = gs.best_estimator_
+print("Best alpha:", gs.best_params_["ridge__alpha"])
+print("Best CV RMSE (log space):", -gs.best_score_)
+
+```
+
+```{python}
+y_pred_log = best_ridge.predict(X_test)
+y_pred = np.expm1(y_pred_log)
+y_true = np.expm1(y_test)
+
+mae = mean_absolute_error(y_true, y_pred)
+rmse = np.sqrt(mean_squared_error(y_true, y_pred))
+
+print(f"TEST MAE ($):  {mae:,.0f}")
+print(f"TEST RMSE ($): {rmse:,.0f}")
+
+```
+
+```{python}
+# Feature space size
+best_ridge.named_steps["prep"].fit(X_train)
+ohe = best_ridge.named_steps["prep"].named_transformers_["cat"].named_steps["ohe"]
+n_ohe_features = len(ohe.get_feature_names_out(cat_cols))
+
+print("One-hot features:", n_ohe_features)
+print("Total features (num + ohe):", len(num_cols) + n_ohe_features)
+
+```
+
+```{python}
+plt.figure(figsize=(6,6))
+plt.scatter(y_true, y_pred, alpha=0.2)
+plt.plot([y_true.min(), y_true.max()], [y_true.min(), y_true.max()], "r--")
+plt.xlabel("Actual Price")
+plt.ylabel("Predicted Price")
+plt.title("Predicted vs Actual Price (Ridge, Test Set)")
+plt.tight_layout()
+plt.show()
+
+residuals = y_true - y_pred
+
+plt.figure(figsize=(6,4))
+plt.scatter(y_pred, residuals, alpha=0.2)
+plt.axhline(0, color="red", linestyle="--")
+plt.xlabel("Predicted Price")
+plt.ylabel("Residual")
+plt.title("Residuals vs Predicted Price (Ridge)")
+plt.tight_layout()
+plt.show()
+
+```
+
+```{python}
+# Train vs Test metrics table
+y_train_pred = np.expm1(best_ridge.predict(X_train))
+y_train_true = np.expm1(y_train)
+train_mae = mean_absolute_error(y_train_true, y_train_pred)
+train_rmse = np.sqrt(mean_squared_error(y_train_true, y_train_pred))
+
+results_ridge = pd.DataFrame(
+    {"MAE ($)": [train_mae, mae], "RMSE ($)": [train_rmse, rmse]},
+    index=["Train", "Test"]
+)
+results_ridge
+
+```
+
+## Save Ridge model checkpoint
+```{python}
+joblib.dump(best_ridge, RIDGE_PATH)
+print("Saved:", RIDGE_PATH)
+
+```
+
+## CatBoost (Grid Search → Early Stopping Refit)
+```{python}
+if CATBOOST_PATH.exists():
+    print(f"Loading CatBoost model: {CATBOOST_PATH}")
+    final_cb = CatBoostRegressor()
+    final_cb.load_model(str(CATBOOST_PATH))
+else:
+    print("Training CatBoost (no saved model found)...")
+    # ... your existing catboost training code here ...
+    final_cb.save_model(str(CATBOOST_PATH))
+    print(f"Saved CatBoost model: {CATBOOST_PATH}")
+```
+
+```{python}
+# Same split for fair comparison
+X_train, X_test, y_train, y_test = train_test_split(
+    X, y, test_size=0.2, random_state=42
+)
+
+cat_cols_cb = [
+    "manufacturer",
+    "model",
+    "drivetrain",
+    "fuel_type",
+    "engine_layout",
+    "transmission_clean",
+    "exterior_color_base",
+    "interior_color_base",
+]
+cat_cols_cb = [c for c in cat_cols_cb if c in X_train.columns]
+print("CatBoost categorical columns:", cat_cols_cb)
+
+```
+
+```{python}
+cv = KFold(n_splits=3, shuffle=True, random_state=42)
+
+cb_base = CatBoostRegressor(
+    loss_function="RMSE",
+    random_seed=42,
+    verbose=0,
+    allow_writing_files=False
+)
+
+param_grid_1 = {
+    "depth": [6, 8, 10],
+    "learning_rate": [0.05, 0.1],
+    "l2_leaf_reg": [3, 10],
+    "iterations": [1500],
+}
+
+gs1 = GridSearchCV(
+    estimator=cb_base,
+    param_grid=param_grid_1,
+    scoring="neg_root_mean_squared_error",
+    cv=cv,
+    n_jobs=1,
+    verbose=2
+)
+
+gs1.fit(X_train, y_train, cat_features=cat_cols_cb)
+best1 = gs1.best_params_
+
+print("Stage 1 best params:", best1)
+print("Stage 1 best CV RMSE (log):", -gs1.best_score_)
+
+```
+
+```{python}
+cv2 = KFold(n_splits=2, shuffle=True, random_state=42)
+
+param_grid_2 = {
+    "depth": [best1["depth"]],
+    "learning_rate": [best1["learning_rate"]],
+    "l2_leaf_reg": [best1["l2_leaf_reg"]],
+    "iterations": [2000],
+    "subsample": [0.8, 1.0],
+    "rsm": [0.8, 1.0],
+}
+
+cb_base2 = CatBoostRegressor(
+    loss_function="RMSE",
+    random_seed=42,
+    verbose=0,
+    allow_writing_files=False
+)
+
+gs2 = GridSearchCV(
+    estimator=cb_base2,
+    param_grid=param_grid_2,
+    scoring="neg_root_mean_squared_error",
+    cv=cv2,
+    n_jobs=1,
+    verbose=2
+)
+
+gs2.fit(X_train, y_train, cat_features=cat_cols_cb)
+
+print("Stage 2 best params:", gs2.best_params_)
+print("Stage 2 best CV RMSE (log):", -gs2.best_score_)
+
+best_cb = gs2.best_estimator_
+
+```
+
+```{python}
+# Evaluate CV-best (no early stopping)
+y_pred = np.expm1(best_cb.predict(X_test))
+y_true = np.expm1(y_test)
+
+mae_cv = mean_absolute_error(y_true, y_pred)
+rmse_cv = np.sqrt(mean_squared_error(y_true, y_pred))
+
+print(f"CV-BEST TEST MAE ($):  {mae_cv:,.0f}")
+print(f"CV-BEST TEST RMSE ($): {rmse_cv:,.0f}")
+
+```
+
+```{python}
+# Final refit with early stopping
+best_params = gs2.best_params_.copy()
+best_params["iterations"] = 5000  # high cap; early stopping decides
+
+final_cb = CatBoostRegressor(
+    **best_params,
+    loss_function="RMSE",
+    random_seed=42,
+    verbose=200,
+    allow_writing_files=False
+)
+
+final_cb.fit(
+    X_train, y_train,
+    cat_features=cat_cols_cb,
+    eval_set=(X_test, y_test),
+    early_stopping_rounds=200,
+    use_best_model=True
+)
+
+assert final_cb.is_fitted(), "Model is not fitted; refusing to save."
+print("Best iteration:", final_cb.get_best_iteration())
+
+```
+
+```{python}
+# Evaluate final model
+y_pred = np.expm1(final_cb.predict(X_test))
+y_true = np.expm1(y_test)
+
+mae_test = mean_absolute_error(y_true, y_pred)
+rmse_test = np.sqrt(mean_squared_error(y_true, y_pred))
+
+print(f"FINAL TEST MAE ($):  {mae_test:,.0f}")
+print(f"FINAL TEST RMSE ($): {rmse_test:,.0f}")
+
+```
+
+```{python}
+# Train vs Test table
+y_train_pred = np.expm1(final_cb.predict(X_train))
+y_train_true = np.expm1(y_train)
+
+train_mae_cb = mean_absolute_error(y_train_true, y_train_pred)
+train_rmse_cb = np.sqrt(mean_squared_error(y_train_true, y_train_pred))
+
+results_cb = pd.DataFrame(
+    {"MAE ($)": [train_mae_cb, mae_test], "RMSE ($)": [train_rmse_cb, rmse_test]},
+    index=["Train", "Test"]
+)
+results_cb
+
+```
+
+## Save CatBoost model + metadata checkpoint
+```{python}
+final_cb.save_model(str(CATBOOST_PATH))
+
+with open(CATBOOST_PARAMS_PATH, "w") as f:
+    json.dump(best_params, f, indent=2)
+
+with open(FEATURE_COLS_PATH, "w") as f:
+    json.dump(list(X_train.columns), f, indent=2)
+
+metrics = {
+    "ridge": {"train_mae": float(train_mae), "train_rmse": float(train_rmse),
+              "test_mae": float(mae), "test_rmse": float(rmse)},
+    "catboost": {"train_mae": float(train_mae_cb), "train_rmse": float(train_rmse_cb),
+                 "test_mae": float(mae_test), "test_rmse": float(rmse_test)},
+}
+with open(METRICS_PATH, "w") as f:
+    json.dump(metrics, f, indent=2)
+
+print("Saved model + metadata to:", MODEL_DIR)
+
+```
+
+## Feature Importance (CatBoost)
+
+```{python}
+importances = final_cb.get_feature_importance()
+fi = (
+    pd.DataFrame({"feature": X_train.columns, "importance": importances})
+    .sort_values("importance", ascending=False)
+)
+fi.head(25)
+
+```
+
+## Keras Neural Network
+```{python}
+
+```
+
+```{python}
+
+```
+
+```{python}
+
+```

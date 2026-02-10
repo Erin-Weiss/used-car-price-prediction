@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.pyc
+
+# Environments
+.venv/
+.env/
+
+# Data & models (artifacts, not source)
+data/
+models/
+*.cbm
+*.joblib
+*.keras
+
+# Jupyter / Quarto
+.ipynb_checkpoints/
+.quarto/
+*_files/
+
+# OS
+.DS_Store
