@@ -1,6 +1,8 @@
 ---
 title: "Used Car Price Prediction (Ridge → CatBoost → Keras Neural Network)"
+jupyter: used-car-price
 author: "Erin Weiss"
+freeze: auto
 format:
   html:
     toc: true
@@ -9,8 +11,6 @@ format:
     code-tools: true
     theme: cosmo
 execute:
-  cache: true
-  freeze: auto
   echo: true
   warning: false
   message: false
@@ -21,7 +21,7 @@ execute:
 > Note: This report automatically exports reusable pipeline code to `src/pipeline.py`.
 > Additional modules in `src/` are placeholders for future CLI training and deployment.
 
-This report runs **locally** (not Colab). It uses:
+This report runs **locally**. It uses:
 
 - **Portable paths** (no hard-coded `/content/` paths)
 - **Kaggle CLI** to download the dataset once
@@ -39,6 +39,7 @@ from pathlib import Path
 import os, json, re
 import numpy as np
 import pandas as pd
+from datetime import datetime
 
 import matplotlib.pyplot as plt
 import seaborn as sns
@@ -59,9 +60,11 @@ import joblib
 # Training control flags
 # ===============================
 RETRAIN_RIDGE = False
-RETRAIN_CATBOOST = False
-RETRAIN_KERAS = False
 
+RETRAIN_CATBOOST = True
+TRAIN_MODE = "smoke"   # "smoke" | "full" | "skip"
+
+RETRAIN_KERAS = False
 
 # --- Portable project paths ---
 def find_project_root(start: Path) -> Path:
@@ -78,10 +81,6 @@ def find_project_root(start: Path) -> Path:
 
 PROJECT_ROOT = find_project_root(Path.cwd())
 print("PROJECT_ROOT =", PROJECT_ROOT)
-
-# If you render from the project root, this is correct.
-# If you render from inside /notebooks, uncomment the next line:
-# PROJECT_ROOT = Path.cwd().resolve().parents[0]
 
 DATA_DIR = PROJECT_ROOT / "data"
 RAW_DIR = DATA_DIR / "raw"
@@ -110,12 +109,67 @@ def load_or_build(path: Path, build_fn, *, label: str):
     print(f"Saved {label} checkpoint → {path}")
     return df_out
 
+# ===============================
+# Ridge artifact paths
+# ===============================
+RIDGE_DIR = MODEL_DIR / "ridge"
+RIDGE_DIR.mkdir(parents=True, exist_ok=True)
 
-RIDGE_PATH = MODEL_DIR / "ridge_pipeline.joblib"
-CATBOOST_PATH = MODEL_DIR / "catboost_final.cbm"
-CATBOOST_PARAMS_PATH = MODEL_DIR / "catboost_best_params.json"
-FEATURE_COLS_PATH = MODEL_DIR / "feature_columns.json"
-METRICS_PATH = MODEL_DIR / "metrics.json"
+RIDGE_LATEST_PATH = RIDGE_DIR / "ridge_pipeline.joblib"   # "latest" pointer
+
+RIDGE_PATH = RIDGE_LATEST_PATH
+
+
+# ===============================
+# CatBoost artifact paths
+# ===============================
+CATBOOST_DIR = MODEL_DIR / "catboost"
+CATBOOST_DIR.mkdir(parents=True, exist_ok=True)
+
+STAGE1_PARAMS_PATH = CATBOOST_DIR / "catboost_stage1_best_params.json"
+STAGE1_DONE = CATBOOST_DIR / "catboost_stage1_done.txt"
+
+STAGE2_PARAMS_PATH = CATBOOST_DIR / "catboost_stage2_best_params.json"
+STAGE2_DONE = CATBOOST_DIR / "catboost_stage2_done.txt"
+
+FINAL_PARAMS_PATH = CATBOOST_DIR / "catboost_final_params.json"
+FINAL_DONE = CATBOOST_DIR / "catboost_done.txt"
+
+CATBOOST_FINAL_PATH = CATBOOST_DIR / "catboost_final.cbm"  # "latest"
+FEATURE_COLS_PATH = CATBOOST_DIR / "feature_columns.json"
+
+STAGE1_INPROGRESS = CATBOOST_DIR / "catboost_stage1_in_progress.txt"
+STAGE2_INPROGRESS = CATBOOST_DIR / "catboost_stage2_in_progress.txt"
+FINAL_INPROGRESS  = CATBOOST_DIR / "catboost_in_progress.txt"
+
+
+def atomic_write_bytes(path: Path, data: bytes):
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_bytes(data)
+    tmp.replace(path)
+
+def atomic_write_json(path: Path, obj):
+    atomic_write_bytes(path, json.dumps(obj, indent=2).encode("utf-8"))
+
+def mark_done(path: Path, text: str = "ok"):
+    atomic_write_bytes(path, (text + "\n").encode("utf-8"))
+
+def mark_in_progress(path: Path, text: str = "in_progress"):
+    atomic_write_bytes(path, (text + "\n").encode("utf-8"))
+
+def clear_file(path: Path):
+    if path.exists():
+        path.unlink()
+
+# ===============================
+# Metrics artifact paths
+# ===============================
+METRICS_DIR = MODEL_DIR / "metrics"
+METRICS_DIR.mkdir(parents=True, exist_ok=True)
+
+METRICS_LATEST_PATH = METRICS_DIR / "metrics_latest.json"
+
+METRICS_PATH = METRICS_LATEST_PATH
 
 PROJECT_ROOT, RAW_CSV
 ```
@@ -355,12 +409,6 @@ df_cleaned.head()
 
 ```{python}
 df_cleaned.isnull().sum()
-
-```
-
-```{python}
-df_cleaned.to_parquet(CLEAN_PARQUET, index=False)
-print("Saved:", CLEAN_PARQUET)
 
 ```
 
@@ -674,12 +722,6 @@ def load_model_or_warn(path, loader, name):
     print(f"⚠️ {name} checkpoint not found — train it to proceed.")
     return None
 
-best_ridge = load_model_or_warn(
-    RIDGE_PATH,
-    joblib.load,
-    "Ridge model"
-)
-
 ```
 
 ```{python}
@@ -758,10 +800,9 @@ else:
     print("Best CV RMSE (log space):", -gs.best_score_)
 
     # Save with timestamp to avoid overwriting
-    from datetime import datetime
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
 
-    ridge_save_path = MODEL_DIR / f"ridge_pipeline_{ts}.joblib"
+    ridge_save_path = RIDGE_DIR / f"ridge_pipeline_{ts}.joblib"
     joblib.dump(best_ridge, ridge_save_path)
 
     # Also update the "latest" symlink / pointer
@@ -812,9 +853,6 @@ else:
     # Feature space size (safe for loaded pipelines too)
     try:
         prep = best_ridge.named_steps["prep"]
-        # prep should already be fitted; but refitting only the transformer is safe and quick
-        prep.fit(X_train)
-
         ohe = prep.named_transformers_["cat"].named_steps["ohe"]
         n_ohe_features = len(ohe.get_feature_names_out(cat_cols))
 
@@ -874,210 +912,403 @@ else:
 ```
 
 ## CatBoost (Grid Search → Early Stopping Refit)
+
 ```{python}
-if CATBOOST_PATH.exists():
-    print(f"Loading CatBoost model: {CATBOOST_PATH}")
-    final_cb = CatBoostRegressor()
-    final_cb.load_model(str(CATBOOST_PATH))
+def print_catboost_status():
+    def status(done, prog):
+        if done.exists(): return "✅ done"
+        if prog.exists(): return "🟡 in progress"
+        return "—"
+    print("CatBoost checkpoint status:")
+    print("  Stage 1:", status(STAGE1_DONE, STAGE1_INPROGRESS))
+    print("  Stage 2:", status(STAGE2_DONE, STAGE2_INPROGRESS))
+    print("  Final:  ", status(FINAL_DONE, FINAL_INPROGRESS))
+
+print_catboost_status()
+```
+
+```{python}
+def get_catboost_training_data(X, y, *, mode="full"):
+    """
+    Returns X_train, X_test, y_train, y_test, and mode-adjusted grids.
+    """
+    X_train, X_test, y_train, y_test = train_test_split(
+        X, y, test_size=0.2, random_state=42
+    )
+
+    cat_cols_cb = [
+        "manufacturer", "model", "drivetrain", "fuel_type", "engine_layout",
+        "transmission_clean", "exterior_color_base", "interior_color_base",
+    ]
+    cat_cols_cb = [c for c in cat_cols_cb if c in X_train.columns]
+
+    if mode == "smoke":
+        # small subset for quick validation
+        n = min(5000, len(X_train))
+        X_train = X_train.sample(n=n, random_state=42)
+        y_train = y_train.loc[X_train.index]
+
+        n2 = min(2000, len(X_test))
+        X_test = X_test.sample(n=n2, random_state=42)
+        y_test = y_test.loc[X_test.index]
+
+        param_grid_1 = {
+            "depth": [6],
+            "learning_rate": [0.1],
+            "l2_leaf_reg": [3],
+            "iterations": [200],
+        }
+        param_grid_2 = {
+            "iterations": [300],
+            "subsample": [1.0],
+            "rsm": [1.0],
+        }
+        final_iterations = 800
+        early_stop = 50
+        cv1_splits = 2
+        cv2_splits = 2
+
+    else:
+        # full run (your original intent)
+        param_grid_1 = {
+            "depth": [6, 8, 10],             
+            "learning_rate": [0.05, 0.1],
+            "l2_leaf_reg": [3, 10],
+            "iterations": [1500],
+        }
+        param_grid_2 = {
+            "iterations": [2000],
+            "subsample": [0.8, 1.0],
+            "rsm": [0.8, 1.0],
+        }
+        final_iterations = 5000
+        early_stop = 200
+        cv1_splits = 3
+        cv2_splits = 2
+
+    return (X_train, X_test, y_train, y_test,
+            cat_cols_cb, param_grid_1, param_grid_2,
+            final_iterations, early_stop, cv1_splits, cv2_splits)
+
+```
+
+```{python}
+# ---------------------------
+# Global "skip" mode
+# ---------------------------
+if TRAIN_MODE == "skip":
+    print("⏭️ Skipping CatBoost training (TRAIN_MODE='skip').")
+    final_cb = None
+    if CATBOOST_FINAL_PATH.exists():
+        final_cb = CatBoostRegressor()
+        final_cb.load_model(str(CATBOOST_FINAL_PATH))
+        print("✅ Loaded CatBoost final model:", CATBOOST_FINAL_PATH)
+    else:
+        print("⚠️ No final CatBoost model found at:", CATBOOST_FINAL_PATH)
+
 else:
-    print("Training CatBoost (no saved model found)...")
-    # ... your existing catboost training code here ...
-    final_cb.save_model(str(CATBOOST_PATH))
-    print(f"Saved CatBoost model: {CATBOOST_PATH}")
+    # If final model exists and we're not retraining, just load it.
+    if CATBOOST_FINAL_PATH.exists() and not RETRAIN_CATBOOST:
+        print("✅ Loading existing CatBoost final model (RETRAIN_CATBOOST=False):")
+        print("  ", CATBOOST_FINAL_PATH)
+        final_cb = CatBoostRegressor()
+        final_cb.load_model(str(CATBOOST_FINAL_PATH))
+
+    else:
+        if CATBOOST_FINAL_PATH.exists() and RETRAIN_CATBOOST:
+            print("🔁 RETRAIN_CATBOOST=True — retraining while keeping old versions.")
+        else:
+            print("🧠 Training CatBoost (no final checkpoint found).")
+
+        # Prepare data + mode-specific settings
+        (X_train, X_test, y_train, y_test,
+         cat_cols_cb, param_grid_1, param_grid_2,
+         final_iterations, early_stop, cv1_splits, cv2_splits) = get_catboost_training_data(X, y, mode=TRAIN_MODE)
+
+        print("TRAIN_MODE:", TRAIN_MODE)
+        print("CatBoost categorical columns:", cat_cols_cb)
+
+        # Timestamp for versioned artifacts for this run
+        run_ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        RUN_DIR = CATBOOST_DIR / f"run_{run_ts}"
+        RUN_DIR.mkdir(parents=True, exist_ok=True)
+        
+        run_info = {
+            "run_ts": run_ts,
+            "train_mode": TRAIN_MODE,
+            "retrain_catboost": bool(RETRAIN_CATBOOST),
+            "data_rows_total": int(len(X)),
+            "train_rows": int(len(X_train)),
+            "test_rows": int(len(X_test)),
+            "cv_stage1_splits": int(cv1_splits),
+            "cv_stage2_splits": int(cv2_splits),
+            "catboost_categorical_columns": list(cat_cols_cb),
+            "stage1_param_grid": param_grid_1,
+            "stage2_param_grid_base": param_grid_2,   # before merge with best1
+            "final_iterations_cap": int(final_iterations),
+            "early_stopping_rounds": int(early_stop),
+        }
+
+        atomic_write_json(RUN_DIR / "run_info.json", run_info)
+        print("📝 Wrote run metadata:", RUN_DIR / "run_info.json")
+
+
+        # -------------------------
+        # Stage 1: coarse tuning
+        # -------------------------
+        if STAGE1_DONE.exists() and STAGE1_PARAMS_PATH.exists() and not RETRAIN_CATBOOST:
+            print("✅ Stage 1 already done — loading best params.")
+            best1 = json.loads(STAGE1_PARAMS_PATH.read_text())
+        else:
+            print("🧪 Stage 1: coarse tuning")
+            clear_file(STAGE1_DONE)
+            mark_in_progress(STAGE1_INPROGRESS, "stage1 started")
+
+            cv1 = KFold(n_splits=cv1_splits, shuffle=True, random_state=42)
+
+            cb_base = CatBoostRegressor(
+                loss_function="RMSE",
+                random_seed=42,
+                verbose=0,
+                allow_writing_files=False
+            )
+
+            gs1 = GridSearchCV(
+                estimator=cb_base,
+                param_grid=param_grid_1,
+                scoring="neg_root_mean_squared_error",
+                cv=cv1,
+                n_jobs=1,   # IMPORTANT: avoid nested parallelism
+                verbose=2
+            )
+
+            gs1.fit(X_train, y_train, cat_features=cat_cols_cb)
+
+            best1 = gs1.best_params_
+            print("Stage 1 best params:", best1)
+            print("Stage 1 best CV RMSE (log):", -gs1.best_score_)
+
+            # Save stage 1 artifacts atomically
+            atomic_write_json(STAGE1_PARAMS_PATH, best1)
+            clear_file(STAGE1_INPROGRESS)
+            mark_done(STAGE1_DONE)
+
+            # Also save a run-scoped copy for auditability
+            atomic_write_json(RUN_DIR / "stage1_best_params.json", best1)
+
+        # -------------------------
+        # Stage 2: refinement
+        # -------------------------
+        if STAGE2_DONE.exists() and STAGE2_PARAMS_PATH.exists() and not RETRAIN_CATBOOST:
+            print("✅ Stage 2 already done — loading refined params.")
+            best2 = json.loads(STAGE2_PARAMS_PATH.read_text())
+        else:
+            print("🧪 Stage 2: refinement")
+            clear_file(STAGE2_DONE)
+            mark_in_progress(STAGE2_INPROGRESS, "stage2 started")
+
+            cv2 = KFold(n_splits=cv2_splits, shuffle=True, random_state=42)
+
+            # Merge stage1 params into stage2 grid (keeps your same logic)
+            stage2_grid = {
+                "depth": [best1["depth"]],
+                "learning_rate": [best1["learning_rate"]],
+                "l2_leaf_reg": [best1["l2_leaf_reg"]],
+                **param_grid_2
+            }
+
+            cb_base2 = CatBoostRegressor(
+                loss_function="RMSE",
+                random_seed=42,
+                verbose=0,
+                allow_writing_files=False
+            )
+
+            gs2 = GridSearchCV(
+                estimator=cb_base2,
+                param_grid=stage2_grid,
+                scoring="neg_root_mean_squared_error",
+                cv=cv2,
+                n_jobs=1,
+                verbose=2
+            )
+
+            gs2.fit(X_train, y_train, cat_features=cat_cols_cb)
+
+            best2 = gs2.best_params_
+            best_cb = gs2.best_estimator_  # ✅ this is the fitted model to evaluate
+
+            print("Stage 2 best params:", best2)
+            print("Stage 2 best CV RMSE (log):", -gs2.best_score_)
+
+            # -------------------------
+            # Evaluate the CV-selected estimator (no early stopping)
+            # -------------------------
+            y_pred_log = best_cb.predict(X_test)  # ✅ was best2.predict(...)
+            y_pred = np.expm1(y_pred_log)
+            y_true = np.expm1(y_test)
+
+            mae_cv = mean_absolute_error(y_true, y_pred)
+            rmse_cv = np.sqrt(mean_squared_error(y_true, y_pred))
+
+            print(f"CV-BEST TEST MAE ($):  {mae_cv:,.0f}")
+            print(f"CV-BEST TEST RMSE ($): {rmse_cv:,.0f}")
+
+            atomic_write_json(STAGE2_PARAMS_PATH, best2)
+            clear_file(STAGE2_INPROGRESS)
+            mark_done(STAGE2_DONE)
+            atomic_write_json(RUN_DIR / "stage2_best_params.json", best2)
+
+        # -------------------------
+        # Stage 3: final refit + early stopping
+        # -------------------------
+        print("🏁 Stage 3: final refit with early stopping")
+        clear_file(FINAL_DONE)
+        mark_in_progress(FINAL_INPROGRESS, "final refit started")
+
+        final_params = best2.copy()
+        final_params["iterations"] = final_iterations  # cap; early stopping decides
+
+        final_cb = CatBoostRegressor(
+            **final_params,
+            loss_function="RMSE",
+            random_seed=42,
+            verbose=200,
+            allow_writing_files=False
+        )
+
+        final_cb.fit(
+            X_train, y_train,
+            cat_features=cat_cols_cb,
+            eval_set=(X_test, y_test),
+            early_stopping_rounds=early_stop,
+            use_best_model=True
+        )
+
+        assert final_cb.is_fitted(), "CatBoost model not fitted; refusing to save."
+        print("Best iteration:", final_cb.get_best_iteration())
+
+        # Save feature columns (for consistent inference later)
+        atomic_write_json(FEATURE_COLS_PATH, list(X_train.columns))
+        atomic_write_json(RUN_DIR / "feature_columns.json", list(X_train.columns))
+
+        # Save params
+        atomic_write_json(FINAL_PARAMS_PATH, final_params)
+        atomic_write_json(RUN_DIR / "final_params.json", final_params)
+
+        # Save model versioned + latest
+        versioned_model_path = RUN_DIR / "catboost_final.cbm"
+        final_cb.save_model(str(versioned_model_path))
+        final_cb.save_model(str(CATBOOST_FINAL_PATH))
+
+        # Done markers
+        clear_file(FINAL_INPROGRESS)
+        mark_done(FINAL_DONE)
+        mark_done(RUN_DIR / "catboost_done.txt")
+
+        print("💾 Saved CatBoost model:")
+        print("  - Latest:", CATBOOST_FINAL_PATH)
+        print("  - Versioned:", versioned_model_path)
+        print("  - Run folder:", RUN_DIR)
 ```
 
 ```{python}
-# Same split for fair comparison
-X_train, X_test, y_train, y_test = train_test_split(
-    X, y, test_size=0.2, random_state=42
-)
+if final_cb is None:
+    print("⚠️ CatBoost model not available — skipping evaluation.")
+else:
+    # Ensure you have X_train/X_test/y_train/y_test in scope
+    # If you loaded the model without training in this session, rebuild the split:
+    if "X_test" not in globals():
+        X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
 
-cat_cols_cb = [
-    "manufacturer",
-    "model",
-    "drivetrain",
-    "fuel_type",
-    "engine_layout",
-    "transmission_clean",
-    "exterior_color_base",
-    "interior_color_base",
-]
-cat_cols_cb = [c for c in cat_cols_cb if c in X_train.columns]
-print("CatBoost categorical columns:", cat_cols_cb)
+    # ✅ Predict in log space, then exponentiate once
+    y_pred_log = final_cb.predict(X_test)
+    y_pred = np.expm1(y_pred_log)
+    y_true = np.expm1(y_test)
 
-```
+    mae_test = mean_absolute_error(y_true, y_pred)
+    rmse_test = np.sqrt(mean_squared_error(y_true, y_pred))
 
-```{python}
-cv = KFold(n_splits=3, shuffle=True, random_state=42)
+    print(f"FINAL TEST MAE ($):  {mae_test:,.0f}")
+    print(f"FINAL TEST RMSE ($): {rmse_test:,.0f}")
+    print("Best iteration:", final_cb.get_best_iteration())
 
-cb_base = CatBoostRegressor(
-    loss_function="RMSE",
-    random_seed=42,
-    verbose=0,
-    allow_writing_files=False
-)
+    # Train vs Test table
+    y_train_pred_log = final_cb.predict(X_train)
+    y_train_pred = np.expm1(y_train_pred_log)
+    y_train_true = np.expm1(y_train)
 
-param_grid_1 = {
-    "depth": [6, 8, 10],
-    "learning_rate": [0.05, 0.1],
-    "l2_leaf_reg": [3, 10],
-    "iterations": [1500],
-}
+    train_mae_cb = mean_absolute_error(y_train_true, y_train_pred)
+    train_rmse_cb = np.sqrt(mean_squared_error(y_train_true, y_train_pred))
 
-gs1 = GridSearchCV(
-    estimator=cb_base,
-    param_grid=param_grid_1,
-    scoring="neg_root_mean_squared_error",
-    cv=cv,
-    n_jobs=1,
-    verbose=2
-)
+    results_cb = pd.DataFrame(
+        {"MAE ($)": [train_mae_cb, mae_test], "RMSE ($)": [train_rmse_cb, rmse_test]},
+        index=["Train", "Test"]
+    )
+    print(results_cb)
 
-gs1.fit(X_train, y_train, cat_features=cat_cols_cb)
-best1 = gs1.best_params_
-
-print("Stage 1 best params:", best1)
-print("Stage 1 best CV RMSE (log):", -gs1.best_score_)
-
-```
-
-```{python}
-cv2 = KFold(n_splits=2, shuffle=True, random_state=42)
-
-param_grid_2 = {
-    "depth": [best1["depth"]],
-    "learning_rate": [best1["learning_rate"]],
-    "l2_leaf_reg": [best1["l2_leaf_reg"]],
-    "iterations": [2000],
-    "subsample": [0.8, 1.0],
-    "rsm": [0.8, 1.0],
-}
-
-cb_base2 = CatBoostRegressor(
-    loss_function="RMSE",
-    random_seed=42,
-    verbose=0,
-    allow_writing_files=False
-)
-
-gs2 = GridSearchCV(
-    estimator=cb_base2,
-    param_grid=param_grid_2,
-    scoring="neg_root_mean_squared_error",
-    cv=cv2,
-    n_jobs=1,
-    verbose=2
-)
-
-gs2.fit(X_train, y_train, cat_features=cat_cols_cb)
-
-print("Stage 2 best params:", gs2.best_params_)
-print("Stage 2 best CV RMSE (log):", -gs2.best_score_)
-
-best_cb = gs2.best_estimator_
-
-```
-
-```{python}
-# Evaluate CV-best (no early stopping)
-y_pred = np.expm1(best_cb.predict(X_test))
-y_true = np.expm1(y_test)
-
-mae_cv = mean_absolute_error(y_true, y_pred)
-rmse_cv = np.sqrt(mean_squared_error(y_true, y_pred))
-
-print(f"CV-BEST TEST MAE ($):  {mae_cv:,.0f}")
-print(f"CV-BEST TEST RMSE ($): {rmse_cv:,.0f}")
-
-```
-
-```{python}
-# Final refit with early stopping
-best_params = gs2.best_params_.copy()
-best_params["iterations"] = 5000  # high cap; early stopping decides
-
-final_cb = CatBoostRegressor(
-    **best_params,
-    loss_function="RMSE",
-    random_seed=42,
-    verbose=200,
-    allow_writing_files=False
-)
-
-final_cb.fit(
-    X_train, y_train,
-    cat_features=cat_cols_cb,
-    eval_set=(X_test, y_test),
-    early_stopping_rounds=200,
-    use_best_model=True
-)
-
-assert final_cb.is_fitted(), "Model is not fitted; refusing to save."
-print("Best iteration:", final_cb.get_best_iteration())
-
-```
-
-```{python}
-# Evaluate final model
-y_pred = np.expm1(final_cb.predict(X_test))
-y_true = np.expm1(y_test)
-
-mae_test = mean_absolute_error(y_true, y_pred)
-rmse_test = np.sqrt(mean_squared_error(y_true, y_pred))
-
-print(f"FINAL TEST MAE ($):  {mae_test:,.0f}")
-print(f"FINAL TEST RMSE ($): {rmse_test:,.0f}")
-
-```
-
-```{python}
-# Train vs Test table
-y_train_pred = np.expm1(final_cb.predict(X_train))
-y_train_true = np.expm1(y_train)
-
-train_mae_cb = mean_absolute_error(y_train_true, y_train_pred)
-train_rmse_cb = np.sqrt(mean_squared_error(y_train_true, y_train_pred))
-
-results_cb = pd.DataFrame(
-    {"MAE ($)": [train_mae_cb, mae_test], "RMSE ($)": [train_rmse_cb, rmse_test]},
-    index=["Train", "Test"]
-)
-results_cb
+    # Feature Importance (CatBoost)
+    importances = final_cb.get_feature_importance()
+    fi = (
+        pd.DataFrame({"feature": X_train.columns, "importance": importances})
+        .sort_values("importance", ascending=False)
+    )
+    print(fi.head(25))
 
 ```
 
 ## Save CatBoost model + metadata checkpoint
-```{python}
-final_cb.save_model(str(CATBOOST_PATH))
-
-with open(CATBOOST_PARAMS_PATH, "w") as f:
-    json.dump(best_params, f, indent=2)
-
-with open(FEATURE_COLS_PATH, "w") as f:
-    json.dump(list(X_train.columns), f, indent=2)
-
-metrics = {
-    "ridge": {"train_mae": float(train_mae), "train_rmse": float(train_rmse),
-              "test_mae": float(mae), "test_rmse": float(rmse)},
-    "catboost": {"train_mae": float(train_mae_cb), "train_rmse": float(train_rmse_cb),
-                 "test_mae": float(mae_test), "test_rmse": float(rmse_test)},
-}
-with open(METRICS_PATH, "w") as f:
-    json.dump(metrics, f, indent=2)
-
-print("Saved model + metadata to:", MODEL_DIR)
-
-```
-
-## Feature Importance (CatBoost)
 
 ```{python}
-importances = final_cb.get_feature_importance()
-fi = (
-    pd.DataFrame({"feature": X_train.columns, "importance": importances})
-    .sort_values("importance", ascending=False)
-)
-fi.head(25)
+# =========================
+# Save Metrics
+# =========================
+
+metrics = {}
+
+# ---------- Ridge metrics ----------
+# Only save if the ridge metrics variables exist
+ridge_vars_exist = all(name in globals() for name in ["train_mae", "train_rmse", "mae", "rmse"])
+
+if ridge_vars_exist:
+    metrics["ridge"] = {
+        "train_mae": float(train_mae),
+        "train_rmse": float(train_rmse),
+        "test_mae": float(mae),
+        "test_rmse": float(rmse),
+    }
+else:
+    print("ℹ️ Skipping Ridge metrics write (train_mae/train_rmse/mae/rmse not all defined yet).")
+
+# ---------- CatBoost metrics ----------
+cat_vars_exist = all(name in globals() for name in ["train_mae_cb", "train_rmse_cb", "mae_test", "rmse_test"])
+
+if cat_vars_exist:
+    metrics["catboost"] = {
+        "train_mae": float(train_mae_cb),
+        "train_rmse": float(train_rmse_cb),
+        "test_mae": float(mae_test),
+        "test_rmse": float(rmse_test),
+        "best_iteration": int(final_cb.get_best_iteration()) if ("final_cb" in globals() and final_cb is not None) else None,
+        "run_dir": str(RUN_DIR) if "RUN_DIR" in globals() else None,
+    }
+else:
+    print("ℹ️ Skipping CatBoost metrics write (train_mae_cb/train_rmse_cb/mae_test/rmse_test not all defined yet).")
+
+# Always write whatever we have (even if partial)
+metrics_ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+METRICS_VERSIONED_PATH = METRICS_DIR / f"metrics_{metrics_ts}.json"
+
+atomic_write_json(METRICS_PATH, metrics)
+print("🧾 Wrote metrics:", METRICS_PATH)
+
+# Versioned snapshot
+atomic_write_json(METRICS_VERSIONED_PATH, metrics)
+
+# Run-specific metrics (only if RUN_DIR exists)
+if "RUN_DIR" in globals():
+    atomic_write_json(RUN_DIR / "metrics.json", metrics)
+    print("🧾 Wrote run metrics:", RUN_DIR / "metrics.json")
 
 ```
 
