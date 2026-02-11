@@ -55,8 +55,30 @@ from sklearn.metrics import mean_absolute_error, mean_squared_error
 from catboost import CatBoostRegressor
 import joblib
 
+# ===============================
+# Training control flags
+# ===============================
+RETRAIN_RIDGE = False
+RETRAIN_CATBOOST = False
+RETRAIN_KERAS = False
+
+
 # --- Portable project paths ---
-PROJECT_ROOT = Path.cwd().resolve()
+def find_project_root(start: Path) -> Path:
+    """
+    Walk upward until we find a project marker.
+    Choose markers that exist in your repo.
+    """
+    markers = ["pyproject.toml", ".git", "README.md"]
+    p = start.resolve()
+    for parent in [p] + list(p.parents):
+        if any((parent / m).exists() for m in markers):
+            return parent
+    return p  # fallback
+
+PROJECT_ROOT = find_project_root(Path.cwd())
+print("PROJECT_ROOT =", PROJECT_ROOT)
+
 # If you render from the project root, this is correct.
 # If you render from inside /notebooks, uncomment the next line:
 # PROJECT_ROOT = Path.cwd().resolve().parents[0]
@@ -292,6 +314,18 @@ print("✅ Wrote:", PIPELINE_PY)
 ```
 
 ```{python}
+df_raw = pd.read_csv(RAW_CSV)
+df_raw.info()
+df_raw.isnull().sum().sort_values(ascending=False)
+
+```
+
+```{python}
+df_raw.head()
+
+```
+
+```{python}
 def build_cleaned_df():
     df_local = pd.read_csv(RAW_CSV)
 
@@ -396,21 +430,18 @@ plt.show()
 
 ```{python}
 order = df_cleaned["manufacturer"].value_counts(ascending=False).index
-plt.figure(figsize=(10, 5))
-sns.countplot(x="manufacturer", data=df_cleaned, order=order)
+
+sns.countplot(x="manufacturer", data=df_cleaned, hue="manufacturer", order=order, palette="viridis")
 plt.title("Distribution of car manufacturers", fontsize=14)
 plt.xticks(rotation=90)
-plt.tight_layout()
 plt.show()
 
 ```
 
 ```{python}
-plt.figure(figsize=(12, 5))
-sns.countplot(x="year", data=df_cleaned, hue="year", legend=False)
+sns.countplot(x="year", data=df_cleaned, hue="year", palette="bright", legend=False)
 plt.title("Distribution of car years", fontsize=14)
 plt.xticks(rotation=90)
-plt.tight_layout()
 plt.show()
 
 ```
@@ -423,13 +454,17 @@ df_models = (
        .reset_index(name="unique_model_count")
 )
 
-plt.figure(figsize=(10, 5))
-sns.barplot(data=df_models, x="manufacturer", y="unique_model_count")
+sns.barplot(
+    data=df_models,
+    x="manufacturer",
+    y="unique_model_count", 
+    hue="manufacturer",
+    palette="viridis"
+)
 plt.xticks(rotation=90)
 plt.ylabel("Unique Model Count")
 plt.xlabel("Manufacturer")
-plt.title("Unique model count per manufacturer", fontsize=14)
-plt.tight_layout()
+plt.title("Distribution of model count per manufacturer", fontsize=14)
 plt.show()
 
 ```
@@ -463,12 +498,11 @@ order = (
     .index
 )
 
-plt.figure(figsize=(12, 6))
-sns.boxplot(data=df_cleaned_filtered, x="manufacturer", y="price", order=order)
+sns.boxplot(data=df_cleaned_filtered, x="manufacturer", y="price", order=order, palette="viridis", hue="manufacturer")
 plt.title("Car Price Distribution by Manufacturer (1–99% within each maker)", fontsize=14)
 plt.xticks(rotation=90)
-plt.tight_layout()
 plt.show()
+
 
 ```
 
@@ -627,187 +661,215 @@ X.head()
 ```
 
 ```{python}
-X.isnull().sum().sort_values(ascending=False).head(15)
-
-```
-
-## Save features checkpoint
-```{python}
-# Save for fast reload later (no need to rerun all parsing)
-features_df = X.copy()
-features_df["target_log1p_price"] = y.values
-
-features_df.to_parquet(FEATURES_PARQUET, index=False)
-print("Saved:", FEATURES_PARQUET)
+X.isnull().sum().sort_values(ascending=False)
 
 ```
 
 ## Ridge Regression (Pipeline + Grid Search)
 ```{python}
-if RIDGE_PATH.exists():
-    print(f"Loading Ridge model: {RIDGE_PATH}")
+def load_model_or_warn(path, loader, name):
+    if path.exists():
+        print(f"Loading {name} from:\n  {path}")
+        return loader(path)
+    print(f"⚠️ {name} checkpoint not found — train it to proceed.")
+    return None
+
+best_ridge = load_model_or_warn(
+    RIDGE_PATH,
+    joblib.load,
+    "Ridge model"
+)
+
+```
+
+```{python}
+best_ridge = None
+
+if RIDGE_PATH.exists() and not RETRAIN_RIDGE:
+    print("✅ Loading existing Ridge model (RETRAIN_RIDGE=False)")
     best_ridge = joblib.load(RIDGE_PATH)
+
 else:
-    print("Training Ridge (no saved model found)...")
-    # ... your existing ridge training code here ...
+    if RIDGE_PATH.exists() and RETRAIN_RIDGE:
+        print("🔁 RETRAIN_RIDGE=True — retraining Ridge while keeping old model")
+    else:
+        print("🧠 Training Ridge (no existing model found)")
+
+    # --- training code here ---
+    X_train, X_test, y_train, y_test = train_test_split(
+        X, y, test_size=0.2, random_state=42
+    )
+
+    num_cols = [
+        "mileage", "mpg_avg", "price_drop", "seller_rating", "driver_rating",
+        "driver_reviews_num", "accidents_or_damage", "one_owner", "personal_use_only",
+        "age", "mileage_per_year", "engine_liters", "engine_cylinders",
+        "engine_turbo", "engine_hybrid", "transmission_gears", "transmission_gears_missing",
+    ]
+
+    cat_cols = [
+        "manufacturer", "model", "drivetrain", "fuel_type", "engine_layout",
+        "transmission_clean", "exterior_color_base", "interior_color_base",
+    ]
+
+    # Defensive for dataset drift
+    num_cols = [c for c in num_cols if c in X_train.columns]
+    cat_cols = [c for c in cat_cols if c in X_train.columns]
+
+    numeric_pipe = Pipeline(steps=[
+        ("imputer", SimpleImputer(strategy="median")),
+        ("scaler", StandardScaler())
+    ])
+
+    categorical_pipe = Pipeline(steps=[
+        ("imputer", SimpleImputer(strategy="most_frequent")),
+        ("ohe", OneHotEncoder(handle_unknown="ignore", min_frequency=50, sparse_output=True))
+    ])
+
+    preprocess = ColumnTransformer(
+        transformers=[
+            ("num", numeric_pipe, num_cols),
+            ("cat", categorical_pipe, cat_cols),
+        ],
+        remainder="drop"
+    )
+
+    ridge_model = Pipeline(steps=[
+        ("prep", preprocess),
+        ("ridge", Ridge(random_state=42)),
+    ])
+
+    cv = KFold(n_splits=5, shuffle=True, random_state=42)
+    param_grid = {"ridge__alpha": np.logspace(-3, 3, 13)}
+
+    gs = GridSearchCV(
+        ridge_model,
+        param_grid=param_grid,
+        scoring="neg_root_mean_squared_error",
+        cv=cv,
+        n_jobs=-1,
+        verbose=1
+    )
+
+    gs.fit(X_train, y_train)
+
+    best_ridge = gs.best_estimator_
+    print("Best alpha:", gs.best_params_["ridge__alpha"])
+    print("Best CV RMSE (log space):", -gs.best_score_)
+
+    # Save with timestamp to avoid overwriting
+    from datetime import datetime
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+    ridge_save_path = MODEL_DIR / f"ridge_pipeline_{ts}.joblib"
+    joblib.dump(best_ridge, ridge_save_path)
+
+    # Also update the "latest" symlink / pointer
     joblib.dump(best_ridge, RIDGE_PATH)
-    print(f"Saved Ridge model: {RIDGE_PATH}")
 
+    print("💾 Saved Ridge models:")
+    print("  - Latest:", RIDGE_PATH)
+    print("  - Versioned:", ridge_save_path)
 ```
 
 ```{python}
-X_train, X_test, y_train, y_test = train_test_split(
-    X, y, test_size=0.2, random_state=42
-)
+# --- Always evaluate Ridge (loaded or newly trained) ---
+if best_ridge is None:
+    print("⚠️ Ridge model is not available — cannot evaluate.")
+else:
+    # Use a fresh split for evaluation (same random_state keeps it consistent)
+    X_train, X_test, y_train, y_test = train_test_split(
+        X, y, test_size=0.2, random_state=42
+    )
 
-num_cols = [
-    "mileage",
-    "mpg_avg",
-    "price_drop",
-    "seller_rating",
-    "driver_rating",
-    "driver_reviews_num",
-    "accidents_or_damage",
-    "one_owner",
-    "personal_use_only",
-    "age",
-    "mileage_per_year",
-    "engine_liters",
-    "engine_cylinders",
-    "engine_turbo",
-    "engine_hybrid",
-    "transmission_gears",
-    "transmission_gears_missing",
-]
+    # Recreate column lists (defensive)
+    num_cols = [
+        "mileage", "mpg_avg", "price_drop", "seller_rating", "driver_rating",
+        "driver_reviews_num", "accidents_or_damage", "one_owner", "personal_use_only",
+        "age", "mileage_per_year", "engine_liters", "engine_cylinders",
+        "engine_turbo", "engine_hybrid", "transmission_gears", "transmission_gears_missing",
+    ]
 
-cat_cols = [
-    "manufacturer",
-    "model",
-    "drivetrain",
-    "fuel_type",
-    "engine_layout",
-    "transmission_clean",
-    "exterior_color_base",
-    "interior_color_base",
-]
+    cat_cols = [
+        "manufacturer", "model", "drivetrain", "fuel_type", "engine_layout",
+        "transmission_clean", "exterior_color_base", "interior_color_base",
+    ]
 
-# Keep only columns that exist (defensive for dataset changes)
-num_cols = [c for c in num_cols if c in X_train.columns]
-cat_cols = [c for c in cat_cols if c in X_train.columns]
-num_cols, cat_cols[:5]
+    num_cols = [c for c in num_cols if c in X_train.columns]
+    cat_cols = [c for c in cat_cols if c in X_train.columns]
 
-```
+    # Predictions
+    y_pred_log = best_ridge.predict(X_test)
+    y_pred = np.expm1(y_pred_log)
+    y_true = np.expm1(y_test)
 
-```{python}
-numeric_pipe = Pipeline(steps=[
-    ("imputer", SimpleImputer(strategy="median")),
-    ("scaler", StandardScaler())
-])
+    mae = mean_absolute_error(y_true, y_pred)
+    rmse = np.sqrt(mean_squared_error(y_true, y_pred))
 
-categorical_pipe = Pipeline(steps=[
-    ("imputer", SimpleImputer(strategy="most_frequent")),
-    ("ohe", OneHotEncoder(handle_unknown="ignore", min_frequency=50, sparse_output=True))
-])
+    print(f"TEST MAE ($):  {mae:,.0f}")
+    print(f"TEST RMSE ($): {rmse:,.0f}")
 
-preprocess = ColumnTransformer(
-    transformers=[
-        ("num", numeric_pipe, num_cols),
-        ("cat", categorical_pipe, cat_cols),
-    ],
-    remainder="drop"
-)
+    # Feature space size (safe for loaded pipelines too)
+    try:
+        prep = best_ridge.named_steps["prep"]
+        # prep should already be fitted; but refitting only the transformer is safe and quick
+        prep.fit(X_train)
 
-ridge_model = Pipeline(steps=[
-    ("prep", preprocess),
-    ("ridge", Ridge(random_state=42)),
-])
+        ohe = prep.named_transformers_["cat"].named_steps["ohe"]
+        n_ohe_features = len(ohe.get_feature_names_out(cat_cols))
 
-cv = KFold(n_splits=5, shuffle=True, random_state=42)
-param_grid = {"ridge__alpha": np.logspace(-3, 3, 13)}
+        print("One-hot features:", n_ohe_features)
+        print("Total features (num + ohe):", len(num_cols) + n_ohe_features)
+    except Exception as e:
+        print("⚠️ Could not compute one-hot feature count:", e)
 
-gs = GridSearchCV(
-    ridge_model,
-    param_grid=param_grid,
-    scoring="neg_root_mean_squared_error",
-    cv=cv,
-    n_jobs=-1,
-    verbose=1
-)
+    # Plots
+    plt.figure(figsize=(6, 6))
+    plt.scatter(y_true, y_pred, alpha=0.2)
+    plt.plot([y_true.min(), y_true.max()], [y_true.min(), y_true.max()], "r--")
+    plt.xlabel("Actual Price")
+    plt.ylabel("Predicted Price")
+    plt.title("Predicted vs Actual Price (Ridge, Test Set)")
+    plt.tight_layout()
+    plt.show()
 
-gs.fit(X_train, y_train)
+    residuals = y_true - y_pred
 
-best_ridge = gs.best_estimator_
-print("Best alpha:", gs.best_params_["ridge__alpha"])
-print("Best CV RMSE (log space):", -gs.best_score_)
+    plt.figure(figsize=(6, 4))
+    plt.scatter(y_pred, residuals, alpha=0.2)
+    plt.axhline(0, color="red", linestyle="--")
+    plt.xlabel("Predicted Price")
+    plt.ylabel("Residual")
+    plt.title("Residuals vs Predicted Price (Ridge)")
+    plt.tight_layout()
+    plt.show()
 
-```
+    # Train vs Test metrics table
+    y_train_pred = np.expm1(best_ridge.predict(X_train))
+    y_train_true = np.expm1(y_train)
+    train_mae = mean_absolute_error(y_train_true, y_train_pred)
+    train_rmse = np.sqrt(mean_squared_error(y_train_true, y_train_pred))
 
-```{python}
-y_pred_log = best_ridge.predict(X_test)
-y_pred = np.expm1(y_pred_log)
-y_true = np.expm1(y_test)
+    results_ridge = pd.DataFrame(
+        {"MAE ($)": [train_mae, mae], "RMSE ($)": [train_rmse, rmse]},
+        index=["Train", "Test"]
+    )
+    display(results_ridge)
 
-mae = mean_absolute_error(y_true, y_pred)
-rmse = np.sqrt(mean_squared_error(y_true, y_pred))
+    # Look at largest absolute residuals in training set
+    train_residuals = y_train_true - y_train_pred
 
-print(f"TEST MAE ($):  {mae:,.0f}")
-print(f"TEST RMSE ($): {rmse:,.0f}")
+    train_outliers = (
+        pd.DataFrame({
+            "actual": y_train_true,
+            "predicted": y_train_pred,
+            "abs_error": np.abs(train_residuals)
+        })
+        .sort_values("abs_error", ascending=False)
+        .head(10)
+    )
 
-```
-
-```{python}
-# Feature space size
-best_ridge.named_steps["prep"].fit(X_train)
-ohe = best_ridge.named_steps["prep"].named_transformers_["cat"].named_steps["ohe"]
-n_ohe_features = len(ohe.get_feature_names_out(cat_cols))
-
-print("One-hot features:", n_ohe_features)
-print("Total features (num + ohe):", len(num_cols) + n_ohe_features)
-
-```
-
-```{python}
-plt.figure(figsize=(6,6))
-plt.scatter(y_true, y_pred, alpha=0.2)
-plt.plot([y_true.min(), y_true.max()], [y_true.min(), y_true.max()], "r--")
-plt.xlabel("Actual Price")
-plt.ylabel("Predicted Price")
-plt.title("Predicted vs Actual Price (Ridge, Test Set)")
-plt.tight_layout()
-plt.show()
-
-residuals = y_true - y_pred
-
-plt.figure(figsize=(6,4))
-plt.scatter(y_pred, residuals, alpha=0.2)
-plt.axhline(0, color="red", linestyle="--")
-plt.xlabel("Predicted Price")
-plt.ylabel("Residual")
-plt.title("Residuals vs Predicted Price (Ridge)")
-plt.tight_layout()
-plt.show()
-
-```
-
-```{python}
-# Train vs Test metrics table
-y_train_pred = np.expm1(best_ridge.predict(X_train))
-y_train_true = np.expm1(y_train)
-train_mae = mean_absolute_error(y_train_true, y_train_pred)
-train_rmse = np.sqrt(mean_squared_error(y_train_true, y_train_pred))
-
-results_ridge = pd.DataFrame(
-    {"MAE ($)": [train_mae, mae], "RMSE ($)": [train_rmse, rmse]},
-    index=["Train", "Test"]
-)
-results_ridge
-
-```
-
-## Save Ridge model checkpoint
-```{python}
-joblib.dump(best_ridge, RIDGE_PATH)
-print("Saved:", RIDGE_PATH)
+    display(train_outliers)
 
 ```
 
