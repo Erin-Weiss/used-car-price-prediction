@@ -34,13 +34,36 @@ def build_features_df(df_cleaned: pd.DataFrame) -> pd.DataFrame:
     y = np.log1p(df_cleaned["price"])
     X = df_cleaned.drop(columns=["price", "seller_name"], errors="ignore").copy()
 
-    REFERENCE_YEAR = 2023
+    REFERENCE_YEAR = 2023 #The dataset ends in the beginning of 2023
 
     # age and mileage per year
     X["age"] = REFERENCE_YEAR - X["year"]
     X["age_for_mpy"] = X["age"].clip(lower=1)
     X["mileage_per_year"] = X["mileage"] / X["age_for_mpy"]
     X = X.drop(columns=["age_for_mpy", "year"])
+
+    def normalize_brand(s: str) -> str:
+        return (
+            str(s)
+            .strip()
+            .upper()
+            .replace("-", " ")
+        )
+
+    LUXURY_BRANDS = {
+        "ACURA", "ALFA ROMEO", "ASTON MARTIN", "AUDI", "BENTLEY", "BMW", "BUGATTI", "CADILLAC", "FERRARI", "GENESIS", "INFINITI", "JAGUAR", "LAMBORGHINI", "LAND ROVER", "LEXUS", "LINCOLN", "LOTUS", "MASERATI", "MCLAREN", "MERCEDES BENZ", "POLESTAR", "PORSCHE", "ROLLS-ROYCE", "TESLA", "VOLVO"
+    }
+
+    X["manufacturer_norm"] = X["manufacturer"].apply(normalize_brand)
+
+    X["is_luxury_brand"] = (
+        X["manufacturer_norm"].isin(LUXURY_BRANDS).astype("int64")
+    )
+
+    X["luxury_age_interaction"] = X["is_luxury_brand"] * X["age"]
+
+    # Drop helper column
+    X = X.drop(columns=["manufacturer_norm"])
 
     def parse_engine(engine):
         s = str(engine).strip().upper()
@@ -144,7 +167,7 @@ def build_features_df(df_cleaned: pd.DataFrame) -> pd.DataFrame:
     X["interior_color_base"] = X["interior_color"].apply(interior_color_base)
     X = X.drop(columns=["interior_color"])
 
-    # casts (optional, keeps types stable)
+    # casts
     numeric_casts = {
         "age": "int64",
         "mileage_per_year": "float64",
@@ -163,7 +186,7 @@ def build_features_df(df_cleaned: pd.DataFrame) -> pd.DataFrame:
         if col in X.columns:
             X[col] = X[col].astype("object")
 
-    # Save BOTH X and y together so you can reload fast
+    # Save X and y 
     features_df = X.copy()
     features_df["target_log1p_price"] = y.values
     return features_df

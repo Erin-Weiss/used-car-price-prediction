@@ -18,23 +18,26 @@ execute:
 
 ## Project Setup
 
-> Note: This report automatically exports reusable pipeline code to `src/pipeline.py`.
-> Additional modules in `src/` are placeholders for future CLI training and deployment.
+> Note: This report automatically exports reusable pipeline code to `src/pipeline.py`. Additional modules in `src/` are placeholders for future CLI training and deployment.
 
 This report runs **locally**. It uses:
 
-- **Portable paths** (no hard-coded `/content/` paths)
-- **Kaggle CLI** to download the dataset once
-- **Checkpoint saves** after each stage (cleaned data, engineered features, trained models)
+-   **Portable paths** (no hard-coded `/content/` paths)
+-   **Kaggle CLI** to download the dataset once
+-   **Checkpoint saves** after each stage (cleaned data, engineered features, trained models)
 
 > Folder structure assumed:
 >
-> - `data/raw/`
-> - `data/processed/`
-> - `models/`
-> - `reports/`
+> -   `data/raw/`
+> -   `data/processed/`
+> -   `models/`
+> -   `reports/`
 
 ```{python}
+# ===============================
+# Load libraries
+# ===============================
+
 from pathlib import Path
 import os, json, re
 import numpy as np
@@ -62,9 +65,13 @@ import joblib
 RETRAIN_RIDGE = True
 
 RETRAIN_CATBOOST = True
-TRAIN_MODE = "full"   # "smoke" | "full" | "skip"
+TRAIN_MODE = "smoke"   # "smoke" | "full" | "skip"
 
 RETRAIN_KERAS = False
+
+# ===============================
+# Paths section
+# ===============================
 
 # --- Portable project paths ---
 def find_project_root(start: Path) -> Path:
@@ -77,7 +84,7 @@ def find_project_root(start: Path) -> Path:
     for parent in [p] + list(p.parents):
         if any((parent / m).exists() for m in markers):
             return parent
-    return p  # fallback
+    return p  
 
 PROJECT_ROOT = find_project_root(Path.cwd())
 print("PROJECT_ROOT =", PROJECT_ROOT)
@@ -115,10 +122,9 @@ def load_or_build(path: Path, build_fn, *, label: str):
 RIDGE_DIR = MODEL_DIR / "ridge"
 RIDGE_DIR.mkdir(parents=True, exist_ok=True)
 
-RIDGE_LATEST_PATH = RIDGE_DIR / "ridge_pipeline.joblib"   # "latest" pointer
+RIDGE_LATEST_PATH = RIDGE_DIR / "ridge_pipeline.joblib"   
 
 RIDGE_PATH = RIDGE_LATEST_PATH
-
 
 # ===============================
 # CatBoost artifact paths
@@ -142,6 +148,12 @@ STAGE1_INPROGRESS = CATBOOST_DIR / "catboost_stage1_in_progress.txt"
 STAGE2_INPROGRESS = CATBOOST_DIR / "catboost_stage2_in_progress.txt"
 FINAL_INPROGRESS  = CATBOOST_DIR / "catboost_in_progress.txt"
 
+def run_dir_name(run_ts: str, train_mode: str) -> str:
+    return f"run_{run_ts}_{train_mode}"
+
+def should_update_latest(train_mode: str) -> bool:
+    # smoke will not update CATBOOST_FINAL_PATH
+    return train_mode == "full"
 
 def atomic_write_bytes(path: Path, data: bytes):
     tmp = path.with_suffix(path.suffix + ".tmp")
@@ -179,13 +191,14 @@ PROJECT_ROOT, RAW_CSV
 import sys
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.append(str(PROJECT_ROOT))
-
 ```
 
-## Export reusable code to src (keeps repo professional)
+## Export reusable code to src (only feature engineering and dataset cleaning for now)
+
 ```{python}
 # Write the cleaning + feature engineering logic into src/pipeline.py
-# NOTE: This does not change your notebook execution logic; it just keeps a reusable copy in src/.
+# NOTE: This does not change notebook execution logic; it just keeps a reusable copy in src/.
+# NOTE: If editing build_features below need to update cars_features_v[insert here].parquet
 
 PIPELINE_PY = PROJECT_ROOT / "src" / "pipeline.py"
 PIPELINE_PY.parent.mkdir(parents=True, exist_ok=True)
@@ -226,13 +239,36 @@ def build_features_df(df_cleaned: pd.DataFrame) -> pd.DataFrame:
     y = np.log1p(df_cleaned["price"])
     X = df_cleaned.drop(columns=["price", "seller_name"], errors="ignore").copy()
 
-    REFERENCE_YEAR = 2023
+    REFERENCE_YEAR = 2023 #The dataset ends in the beginning of 2023
 
     # age and mileage per year
     X["age"] = REFERENCE_YEAR - X["year"]
     X["age_for_mpy"] = X["age"].clip(lower=1)
     X["mileage_per_year"] = X["mileage"] / X["age_for_mpy"]
     X = X.drop(columns=["age_for_mpy", "year"])
+
+    def normalize_brand(s: str) -> str:
+        return (
+            str(s)
+            .strip()
+            .upper()
+            .replace("-", " ")
+        )
+
+    LUXURY_BRANDS = {
+        "ACURA", "ALFA ROMEO", "ASTON MARTIN", "AUDI", "BENTLEY", "BMW", "BUGATTI", "CADILLAC", "FERRARI", "GENESIS", "INFINITI", "JAGUAR", "LAMBORGHINI", "LAND ROVER", "LEXUS", "LINCOLN", "LOTUS", "MASERATI", "MCLAREN", "MERCEDES BENZ", "POLESTAR", "PORSCHE", "ROLLS-ROYCE", "TESLA", "VOLVO"
+    }
+
+    X["manufacturer_norm"] = X["manufacturer"].apply(normalize_brand)
+
+    X["is_luxury_brand"] = (
+        X["manufacturer_norm"].isin(LUXURY_BRANDS).astype("int64")
+    )
+
+    X["luxury_age_interaction"] = X["is_luxury_brand"] * X["age"]
+
+    # Drop helper column
+    X = X.drop(columns=["manufacturer_norm"])
 
     def parse_engine(engine):
         s = str(engine).strip().upper()
@@ -336,7 +372,7 @@ def build_features_df(df_cleaned: pd.DataFrame) -> pd.DataFrame:
     X["interior_color_base"] = X["interior_color"].apply(interior_color_base)
     X = X.drop(columns=["interior_color"])
 
-    # casts (optional, keeps types stable)
+    # casts
     numeric_casts = {
         "age": "int64",
         "mileage_per_year": "float64",
@@ -355,7 +391,7 @@ def build_features_df(df_cleaned: pd.DataFrame) -> pd.DataFrame:
         if col in X.columns:
             X[col] = X[col].astype("object")
 
-    # Save BOTH X and y together so you can reload fast
+    # Save X and y 
     features_df = X.copy()
     features_df["target_log1p_price"] = y.values
     return features_df
@@ -363,22 +399,22 @@ def build_features_df(df_cleaned: pd.DataFrame) -> pd.DataFrame:
 
 PIPELINE_PY.write_text(pipeline_code, encoding="utf-8")
 print("✅ Wrote:", PIPELINE_PY)
-
-
 ```
 
+## Import Raw Data and Clean Dataset
+
+### Import Raw and Display Original Data
 ```{python}
 df_raw = pd.read_csv(RAW_CSV)
 df_raw.info()
-df_raw.isnull().sum().sort_values(ascending=False)
-
+display(df_raw.isnull().sum().sort_values(ascending=False))
 ```
 
 ```{python}
-df_raw.head()
-
+display(df_raw.head())
 ```
 
+### Clean Dataset, Save to Parquet, and Display Cleaned Dataframe
 ```{python}
 def build_cleaned_df():
     df_local = pd.read_csv(RAW_CSV)
@@ -403,17 +439,14 @@ def build_cleaned_df():
     return df_cleaned
 
 df_cleaned = load_or_build(CLEAN_PARQUET, build_cleaned_df, label="cleaned dataset")
-df_cleaned.head()
-
+display(df_cleaned.head())
 ```
 
 ```{python}
-df_cleaned.isnull().sum()
-
+display(df_cleaned.isnull().sum())
 ```
 
-## EDA
-
+## EDA (before feature engineering)
 ```{python}
 summary = (
     df_cleaned
@@ -423,7 +456,7 @@ summary = (
     .join(df_cleaned.dtypes.rename("dtype"))
     .sort_values("n_unique", ascending=False)
 )
-summary.head(20)
+display(summary.head(20))
 ```
 
 ```{python}
@@ -449,9 +482,10 @@ desc = df_cleaned["price"].describe()
 formatted = desc.astype(object)
 formatted.loc["count"] = f"{int(desc.loc['count']):,}"
 formatted.loc[formatted.index != "count"] = formatted.loc[formatted.index != "count"].map(lambda x: f"${x:,.2f}")
-formatted
+display(formatted)
 ```
 
+### Exploratory Graphs
 ```{python}
 fig, ax = plt.subplots(figsize=(8, 5))
 sns.histplot(df_cleaned["price"], bins=60, ax=ax)
@@ -473,7 +507,6 @@ ax.set_title("Price Distribution (Outliers Removed)", fontsize=14)
 ax.set_xlabel("Price")
 plt.tight_layout()
 plt.show()
-
 ```
 
 ```{python}
@@ -483,7 +516,6 @@ sns.countplot(x="manufacturer", data=df_cleaned, hue="manufacturer", order=order
 plt.title("Distribution of car manufacturers", fontsize=14)
 plt.xticks(rotation=90)
 plt.show()
-
 ```
 
 ```{python}
@@ -491,7 +523,6 @@ sns.countplot(x="year", data=df_cleaned, hue="year", palette="bright", legend=Fa
 plt.title("Distribution of car years", fontsize=14)
 plt.xticks(rotation=90)
 plt.show()
-
 ```
 
 ```{python}
@@ -514,17 +545,21 @@ plt.ylabel("Unique Model Count")
 plt.xlabel("Manufacturer")
 plt.title("Distribution of model count per manufacturer", fontsize=14)
 plt.show()
-
 ```
 
 ```{python}
-plt.figure(figsize=(12, 5))
-sns.boxplot(data=df_cleaned, x="manufacturer", y="price")
+order = (
+    df_cleaned
+    .groupby("manufacturer")["price"]
+    .median()
+    .sort_values(ascending=False)
+    .index
+)
+
+sns.boxplot(data=df_cleaned, x="manufacturer", y="price", order=order, palette="viridis", hue="manufacturer")
 plt.title("Car Price Distribution by Manufacturer", fontsize=14)
 plt.xticks(rotation=90)
-plt.tight_layout()
 plt.show()
-
 ```
 
 ```{python}
@@ -550,24 +585,47 @@ sns.boxplot(data=df_cleaned_filtered, x="manufacturer", y="price", order=order, 
 plt.title("Car Price Distribution by Manufacturer (1–99% within each maker)", fontsize=14)
 plt.xticks(rotation=90)
 plt.show()
-
-
 ```
 
-## Feature Engineering (and save checkpoint)
+## Feature Engineering and Save New Parquet
 ```{python}
+# NOTE: If editing build_features below need to update cars_features_v[insert here].parquet and src code
+
 def build_features_df():
     # start from cleaned df already in memory
     y = np.log1p(df_cleaned["price"])
     X = df_cleaned.drop(columns=["price", "seller_name"], errors="ignore").copy()
 
-    REFERENCE_YEAR = 2023
+    REFERENCE_YEAR = 2023 #The dataset ends in the beginning of 2023
 
     # age and mileage per year
     X["age"] = REFERENCE_YEAR - X["year"]
     X["age_for_mpy"] = X["age"].clip(lower=1)
     X["mileage_per_year"] = X["mileage"] / X["age_for_mpy"]
     X = X.drop(columns=["age_for_mpy", "year"])
+
+    def normalize_brand(s: str) -> str:
+        return (
+            str(s)
+            .strip()
+            .upper()
+            .replace("-", " ")
+        )
+
+    LUXURY_BRANDS = {
+        "ACURA", "ALFA ROMEO", "ASTON MARTIN", "AUDI", "BENTLEY", "BMW", "BUGATTI", "CADILLAC", "FERRARI", "GENESIS", "INFINITI", "JAGUAR", "LAMBORGHINI", "LAND ROVER", "LEXUS", "LINCOLN", "LOTUS", "MASERATI", "MCLAREN", "MERCEDES BENZ", "POLESTAR", "PORSCHE", "ROLLS-ROYCE", "TESLA", "VOLVO"
+    }
+
+    X["manufacturer_norm"] = X["manufacturer"].apply(normalize_brand)
+
+    X["is_luxury_brand"] = (
+        X["manufacturer_norm"].isin(LUXURY_BRANDS).astype("int64")
+    )
+
+    X["luxury_age_interaction"] = X["is_luxury_brand"] * X["age"]
+
+    # Drop helper column
+    X = X.drop(columns=["manufacturer_norm"])
 
     def parse_engine(engine):
         s = str(engine).strip().upper()
@@ -671,7 +729,7 @@ def build_features_df():
     X["interior_color_base"] = X["interior_color"].apply(interior_color_base)
     X = X.drop(columns=["interior_color"])
 
-    # casts (optional, keeps types stable)
+    # casts
     numeric_casts = {
         "age": "int64",
         "mileage_per_year": "float64",
@@ -690,7 +748,7 @@ def build_features_df():
         if col in X.columns:
             X[col] = X[col].astype("object")
 
-    # Save BOTH X and y together so you can reload fast
+    # Save X and y
     features_df = X.copy()
     features_df["target_log1p_price"] = y.values
     return features_df
@@ -700,20 +758,75 @@ features_df = load_or_build(FEATURES_PARQUET, build_features_df, label="feature 
 # Split back out into X and y for modeling
 y = features_df["target_log1p_price"]
 X = features_df.drop(columns=["target_log1p_price"])
+```
 
+### Display Dataframe After Feature Engineering
+```{python}
+display(X.head())
 ```
 
 ```{python}
-X.head()
-
+display(X.isnull().sum().sort_values(ascending=False))
 ```
 
+## Make Train/Val/Test Splits
 ```{python}
-X.isnull().sum().sort_values(ascending=False)
+# ----------------------------
+# Reproducible train/val/test split
+# ----------------------------
+SPLIT_SEED = 42
+SPLITS_PATH = PROCESSED_DIR / "splits_indices_v1.json"
 
+def make_or_load_splits(X, y, path=SPLITS_PATH, seed=SPLIT_SEED, test_size=0.2, val_size=0.2):
+    """
+    Creates:
+      - test split: test_size (e.g. 0.2)
+      - then splits remaining into train/val with val_size fraction of the remaining
+    Persists indices so Ridge/CatBoost always use exact same rows.
+    """
+    if path.exists():
+        split_idx = json.loads(path.read_text())
+        train_idx = np.array(split_idx["train_idx"])
+        val_idx   = np.array(split_idx["val_idx"])
+        test_idx  = np.array(split_idx["test_idx"])
+        return train_idx, val_idx, test_idx
+
+    # First- hold out test
+    idx_all = np.arange(len(X))
+    trainval_idx, test_idx = train_test_split(
+        idx_all, test_size=test_size, random_state=seed
+    )
+
+    # Second- split trainval into train and val
+    # val_size is fraction of trainval (so overall val fraction is (1-test_size)*val_size
+    train_idx, val_idx = train_test_split(
+        trainval_idx, test_size=val_size, random_state=seed
+    )
+
+    split_idx = {
+        "seed": seed,
+        "test_size": test_size,
+        "val_size_of_trainval": val_size,
+        "train_idx": train_idx.tolist(),
+        "val_idx": val_idx.tolist(),
+        "test_idx": test_idx.tolist(),
+    }
+    path.write_text(json.dumps(split_idx, indent=2))
+    print("✅ Saved split indices:", path)
+
+    return train_idx, val_idx, test_idx
+
+
+train_idx, val_idx, test_idx = make_or_load_splits(X, y)
+
+X_train, y_train = X.iloc[train_idx], y.iloc[train_idx]
+X_val,   y_val   = X.iloc[val_idx],   y.iloc[val_idx]
+X_test,  y_test  = X.iloc[test_idx],  y.iloc[test_idx]
+
+print("Rows:", {"train": len(X_train), "val": len(X_val), "test": len(X_test)})
 ```
 
-## Ridge Regression (Pipeline + Grid Search)
+## Model Section
 ```{python}
 def load_model_or_warn(path, loader, name):
     if path.exists():
@@ -721,10 +834,17 @@ def load_model_or_warn(path, loader, name):
         return loader(path)
     print(f"⚠️ {name} checkpoint not found — train it to proceed.")
     return None
-
 ```
 
+### Ridge Regression (Pipeline + Grid Search)
+
+#### Ridge Training
 ```{python}
+# ==========================================================
+# RIDGE: Train (CV on train) → Refit (train+val) → Evaluate (test)
+# Uses the shared X_train/X_val/X_test and y_train/y_val/y_test
+# ==========================================================
+
 best_ridge = None
 
 if RIDGE_PATH.exists() and not RETRAIN_RIDGE:
@@ -735,18 +855,14 @@ else:
     if RIDGE_PATH.exists() and RETRAIN_RIDGE:
         print("🔁 RETRAIN_RIDGE=True — retraining Ridge while keeping old model")
     else:
-        print("🧠 Training Ridge (no existing model found)")
-
-    # --- training code here ---
-    X_train, X_test, y_train, y_test = train_test_split(
-        X, y, test_size=0.2, random_state=42
-    )
+        print("🔁 Training Ridge (no existing model found)")
 
     num_cols = [
         "mileage", "mpg_avg", "price_drop", "seller_rating", "driver_rating",
         "driver_reviews_num", "accidents_or_damage", "one_owner", "personal_use_only",
         "age", "mileage_per_year", "engine_liters", "engine_cylinders",
         "engine_turbo", "engine_hybrid", "transmission_gears", "transmission_gears_missing",
+        "is_luxury_brand",
     ]
 
     cat_cols = [
@@ -754,7 +870,6 @@ else:
         "transmission_clean", "exterior_color_base", "interior_color_base",
     ]
 
-    # Defensive for dataset drift
     num_cols = [c for c in num_cols if c in X_train.columns]
     cat_cols = [c for c in cat_cols if c in X_train.columns]
 
@@ -778,7 +893,7 @@ else:
 
     ridge_model = Pipeline(steps=[
         ("prep", preprocess),
-        ("ridge", Ridge(random_state=42)),
+        ("ridge", Ridge()),
     ])
 
     cv = KFold(n_splits=5, shuffle=True, random_state=42)
@@ -794,18 +909,20 @@ else:
     )
 
     gs.fit(X_train, y_train)
-
     best_ridge = gs.best_estimator_
+
     print("Best alpha:", gs.best_params_["ridge__alpha"])
     print("Best CV RMSE (log space):", -gs.best_score_)
 
+    X_trainval = pd.concat([X_train, X_val], axis=0)
+    y_trainval = pd.concat([y_train, y_val], axis=0)
+    best_ridge.fit(X_trainval, y_trainval)
+
     # Save with timestamp to avoid overwriting
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-
     ridge_save_path = RIDGE_DIR / f"ridge_pipeline_{ts}.joblib"
-    joblib.dump(best_ridge, ridge_save_path)
 
-    # Also update the "latest" symlink / pointer
+    joblib.dump(best_ridge, ridge_save_path)
     joblib.dump(best_ridge, RIDGE_PATH)
 
     print("💾 Saved Ridge models:")
@@ -813,24 +930,24 @@ else:
     print("  - Versioned:", ridge_save_path)
 ```
 
+#### Ridge Evaluation
 ```{python}
-# --- Always evaluate Ridge (loaded or newly trained) ---
-if best_ridge is None:
+# ==========================================================
+# RIDGE EVALUATION
+# ==========================================================
+
+if "TRAIN_MODE" in globals() and TRAIN_MODE == "skip":
+    print("⏭️ TRAIN_MODE='skip' — skipping Ridge evaluation block.")
+elif best_ridge is None:
     print("⚠️ Ridge model is not available — cannot evaluate.")
 else:
-    # Use a fresh split for evaluation (same random_state keeps it consistent)
-    X_train, X_test, y_train, y_test = train_test_split(
-        X, y, test_size=0.2, random_state=42
-    )
-
-    # Recreate column lists (defensive)
     num_cols = [
         "mileage", "mpg_avg", "price_drop", "seller_rating", "driver_rating",
         "driver_reviews_num", "accidents_or_damage", "one_owner", "personal_use_only",
         "age", "mileage_per_year", "engine_liters", "engine_cylinders",
         "engine_turbo", "engine_hybrid", "transmission_gears", "transmission_gears_missing",
+        "is_luxury_brand",
     ]
-
     cat_cols = [
         "manufacturer", "model", "drivetrain", "fuel_type", "engine_layout",
         "transmission_clean", "exterior_color_base", "interior_color_base",
@@ -839,80 +956,80 @@ else:
     num_cols = [c for c in num_cols if c in X_train.columns]
     cat_cols = [c for c in cat_cols if c in X_train.columns]
 
-    # Predictions
-    y_pred_log = best_ridge.predict(X_test)
-    y_pred = np.expm1(y_pred_log)
-    y_true = np.expm1(y_test)
+    ridge_pred_log_test = best_ridge.predict(X_test)
+    ridge_pred_test = np.expm1(ridge_pred_log_test)
+    ridge_true_test = np.expm1(y_test)
 
-    mae = mean_absolute_error(y_true, y_pred)
-    rmse = np.sqrt(mean_squared_error(y_true, y_pred))
+    ridge_mae_test = mean_absolute_error(ridge_true_test, ridge_pred_test)
+    ridge_rmse_test = np.sqrt(mean_squared_error(ridge_true_test, ridge_pred_test))
 
-    print(f"TEST MAE ($):  {mae:,.0f}")
-    print(f"TEST RMSE ($): {rmse:,.0f}")
+    print(f"RIDGE TEST MAE ($):  {ridge_mae_test:,.0f}")
+    print(f"RIDGE TEST RMSE ($): {ridge_rmse_test:,.0f}")
 
-    # Feature space size (safe for loaded pipelines too)
     try:
         prep = best_ridge.named_steps["prep"]
         ohe = prep.named_transformers_["cat"].named_steps["ohe"]
         n_ohe_features = len(ohe.get_feature_names_out(cat_cols))
-
         print("One-hot features:", n_ohe_features)
         print("Total features (num + ohe):", len(num_cols) + n_ohe_features)
     except Exception as e:
         print("⚠️ Could not compute one-hot feature count:", e)
 
-    # Plots
+    # Base plots (unclipped)
     plt.figure(figsize=(6, 6))
-    plt.scatter(y_true, y_pred, alpha=0.2)
-    plt.plot([y_true.min(), y_true.max()], [y_true.min(), y_true.max()], "r--")
-    plt.xlabel("Actual Price")
-    plt.ylabel("Predicted Price")
+    plt.scatter(ridge_true_test, ridge_pred_test, alpha=0.2)
+    plt.plot([ridge_true_test.min(), ridge_true_test.max()], [ridge_true_test.min(), ridge_true_test.max()], "r--")
+    plt.xlabel("Actual Price ($)")
+    plt.ylabel("Predicted Price ($)")
     plt.title("Predicted vs Actual Price (Ridge, Test Set)")
     plt.tight_layout()
     plt.show()
 
-    residuals = y_true - y_pred
+    ridge_residuals_test = ridge_true_test - ridge_pred_test
 
     plt.figure(figsize=(6, 4))
-    plt.scatter(y_pred, residuals, alpha=0.2)
+    plt.scatter(ridge_pred_test, ridge_residuals_test, alpha=0.2)
     plt.axhline(0, color="red", linestyle="--")
-    plt.xlabel("Predicted Price")
-    plt.ylabel("Residual")
-    plt.title("Residuals vs Predicted Price (Ridge)")
+    plt.xlabel("Predicted Price ($)")
+    plt.ylabel("Residual ($)")
+    plt.title("Residuals vs Predicted Price (Ridge, Test Set)")
     plt.tight_layout()
     plt.show()
 
-    # Train vs Test metrics table
-    y_train_pred = np.expm1(best_ridge.predict(X_train))
-    y_train_true = np.expm1(y_train)
-    train_mae = mean_absolute_error(y_train_true, y_train_pred)
-    train_rmse = np.sqrt(mean_squared_error(y_train_true, y_train_pred))
+    # Train+Val metrics
+    X_trainval = pd.concat([X_train, X_val], axis=0)
+    y_trainval = pd.concat([y_train, y_val], axis=0)
+
+    ridge_pred_trainval = np.expm1(best_ridge.predict(X_trainval))
+    ridge_true_trainval = np.expm1(y_trainval)
+
+    ridge_mae_trainval = mean_absolute_error(ridge_true_trainval, ridge_pred_trainval)
+    ridge_rmse_trainval = np.sqrt(mean_squared_error(ridge_true_trainval, ridge_pred_trainval))
 
     results_ridge = pd.DataFrame(
-        {"MAE ($)": [train_mae, mae], "RMSE ($)": [train_rmse, rmse]},
-        index=["Train", "Test"]
+        {"MAE ($)": [ridge_mae_trainval, ridge_mae_test],
+         "RMSE ($)": [ridge_rmse_trainval, ridge_rmse_test]},
+        index=["Train+Val", "Test"]
     )
     display(results_ridge)
 
-    # Look at largest absolute residuals in training set
-    train_residuals = y_train_true - y_train_pred
-
-    train_outliers = (
+    # Largest abs residuals on Train+Val
+    ridge_residuals_trainval = ridge_true_trainval - ridge_pred_trainval
+    ridge_outliers_trainval = (
         pd.DataFrame({
-            "actual": y_train_true,
-            "predicted": y_train_pred,
-            "abs_error": np.abs(train_residuals)
+            "actual": ridge_true_trainval,
+            "predicted": ridge_pred_trainval,
+            "abs_error": np.abs(ridge_residuals_trainval)
         })
         .sort_values("abs_error", ascending=False)
         .head(10)
     )
-
-    display(train_outliers)
-
+    display(ridge_outliers_trainval)
 ```
 
-## CatBoost (Grid Search → Early Stopping Refit)
+### CatBoost (Grid Search → Early Stopping Refit)
 
+#### Catboost Setup Functions
 ```{python}
 def print_catboost_status():
     def status(done, prog):
@@ -928,13 +1045,18 @@ print_catboost_status()
 ```
 
 ```{python}
+# ==========================================================
+# CatBoost helper - Get data for smoke vs. full
+# ==========================================================
+
 def get_catboost_training_data(X, y, *, mode="full"):
     """
-    Returns X_train, X_test, y_train, y_test, and mode-adjusted grids.
+    Returns X_train, X_val, X_test, y_train, y_val, y_test
+    using the shared split variables already created earlier in the notebook.
+
+    It adjusts smoke/full behavior and returns grids + settings.
     """
-    X_train, X_test, y_train, y_test = train_test_split(
-        X, y, test_size=0.2, random_state=42
-    )
+    global X_train, X_val, X_test, y_train, y_val, y_test
 
     cat_cols_cb = [
         "manufacturer", "model", "drivetrain", "fuel_type", "engine_layout",
@@ -945,12 +1067,16 @@ def get_catboost_training_data(X, y, *, mode="full"):
     if mode == "smoke":
         # small subset for quick validation
         n = min(5000, len(X_train))
-        X_train = X_train.sample(n=n, random_state=42)
-        y_train = y_train.loc[X_train.index]
+        X_train_sm = X_train.sample(n=n, random_state=42)
+        y_train_sm = y_train.loc[X_train_sm.index]
 
-        n2 = min(2000, len(X_test))
-        X_test = X_test.sample(n=n2, random_state=42)
-        y_test = y_test.loc[X_test.index]
+        n2 = min(2000, len(X_val))
+        X_val_sm = X_val.sample(n=n2, random_state=42)
+        y_val_sm = y_val.loc[X_val_sm.index]
+
+        n3 = min(2000, len(X_test))
+        X_test_sm = X_test.sample(n=n3, random_state=42)
+        y_test_sm = y_test.loc[X_test_sm.index]
 
         param_grid_1 = {
             "depth": [6],
@@ -968,10 +1094,15 @@ def get_catboost_training_data(X, y, *, mode="full"):
         cv1_splits = 2
         cv2_splits = 2
 
+        return (X_train_sm, X_val_sm, X_test_sm,
+                y_train_sm, y_val_sm, y_test_sm,
+                cat_cols_cb, param_grid_1, param_grid_2,
+                final_iterations, early_stop, cv1_splits, cv2_splits)
+
     else:
-        # full run (your original intent)
+        # full run 
         param_grid_1 = {
-            "depth": [6, 8, 10],             
+            "depth": [6, 8, 10],
             "learning_rate": [0.05, 0.1],
             "l2_leaf_reg": [3, 10],
             "iterations": [1500],
@@ -982,23 +1113,57 @@ def get_catboost_training_data(X, y, *, mode="full"):
             "rsm": [0.8, 1.0],
         }
         final_iterations = 5000
-        early_stop = 200
+        early_stop = 300
         cv1_splits = 3
         cv2_splits = 2
 
-    return (X_train, X_test, y_train, y_test,
-            cat_cols_cb, param_grid_1, param_grid_2,
-            final_iterations, early_stop, cv1_splits, cv2_splits)
-
+        return (X_train, X_val, X_test,
+                y_train, y_val, y_test,
+                cat_cols_cb, param_grid_1, param_grid_2,
+                final_iterations, early_stop, cv1_splits, cv2_splits)
 ```
 
 ```{python}
+def _stage_paths(run_dir: Path, stage: str):
+    """
+    Return run-scoped marker/param paths so smoke runs never touch global files.
+    stage: "stage1" | "stage2" | "final"
+    """
+    if stage == "stage1":
+        return {
+            "params": run_dir / "stage1_best_params.json",
+            "done":   run_dir / "stage1_done.txt",
+            "inprog": run_dir / "stage1_in_progress.txt",
+        }
+    if stage == "stage2":
+        return {
+            "params": run_dir / "stage2_best_params.json",
+            "done":   run_dir / "stage2_done.txt",
+            "inprog": run_dir / "stage2_in_progress.txt",
+        }
+    if stage == "final":
+        return {
+            "params": run_dir / "final_params.json",
+            "done":   run_dir / "catboost_done.txt",
+            "inprog": run_dir / "final_in_progress.txt",
+        }
+    raise ValueError(f"Unknown stage: {stage}")
+```
+
+#### Catboost Training
+```{python}
+# ---------------------------
+# CatBoost training / loading
+# ---------------------------
+
+final_cb = None
+RUN_DIR = None 
+
 # ---------------------------
 # Global "skip" mode
 # ---------------------------
 if TRAIN_MODE == "skip":
     print("⏭️ Skipping CatBoost training (TRAIN_MODE='skip').")
-    final_cb = None
     if CATBOOST_FINAL_PATH.exists():
         final_cb = CatBoostRegressor()
         final_cb.load_model(str(CATBOOST_FINAL_PATH))
@@ -1007,21 +1172,27 @@ if TRAIN_MODE == "skip":
         print("⚠️ No final CatBoost model found at:", CATBOOST_FINAL_PATH)
 
 else:
-    # If final model exists and we're not retraining, just load it.
-    if CATBOOST_FINAL_PATH.exists() and not RETRAIN_CATBOOST:
-        print("✅ Loading existing CatBoost final model (RETRAIN_CATBOOST=False):")
+    # --------------------------------------------
+    # Full mode can load existing latest (optional)
+    # --------------------------------------------
+    if (TRAIN_MODE == "full") and CATBOOST_FINAL_PATH.exists() and (not RETRAIN_CATBOOST):
+        print("✅ Loading existing CatBoost final model (RETRAIN_CATBOOST=False, TRAIN_MODE='full'):")
         print("  ", CATBOOST_FINAL_PATH)
         final_cb = CatBoostRegressor()
         final_cb.load_model(str(CATBOOST_FINAL_PATH))
 
     else:
-        if CATBOOST_FINAL_PATH.exists() and RETRAIN_CATBOOST:
+        # We are training (either smoke, or full retrain, or no model exists)
+        if TRAIN_MODE == "smoke":
+            print("Smoke mode: quick end-to-end training sanity check (will NOT update latest).")
+        elif CATBOOST_FINAL_PATH.exists() and RETRAIN_CATBOOST:
             print("🔁 RETRAIN_CATBOOST=True — retraining while keeping old versions.")
         else:
-            print("🧠 Training CatBoost (no final checkpoint found).")
+            print("Training CatBoost (no final checkpoint found).")
 
-        # Prepare data + mode-specific settings
-        (X_train, X_test, y_train, y_test,
+        # Prepare data + mode-specific settings (uses get_catboost_training_data)
+        (X_train_cb, X_val_cb, X_test_cb,
+         y_train_cb, y_val_cb, y_test_cb,
          cat_cols_cb, param_grid_1, param_grid_2,
          final_iterations, early_stop, cv1_splits, cv2_splits) = get_catboost_training_data(X, y, mode=TRAIN_MODE)
 
@@ -1030,235 +1201,306 @@ else:
 
         # Timestamp for versioned artifacts for this run
         run_ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        RUN_DIR = CATBOOST_DIR / f"run_{run_ts}"
+        RUN_DIR = CATBOOST_DIR / run_dir_name(run_ts, TRAIN_MODE)
         RUN_DIR.mkdir(parents=True, exist_ok=True)
-        
+
+        # Run metadata
         run_info = {
             "run_ts": run_ts,
             "train_mode": TRAIN_MODE,
             "retrain_catboost": bool(RETRAIN_CATBOOST),
             "data_rows_total": int(len(X)),
-            "train_rows": int(len(X_train)),
-            "test_rows": int(len(X_test)),
+            "train_rows": int(len(X_train_cb)),
+            "val_rows": int(len(X_val_cb)),
+            "test_rows": int(len(X_test_cb)),
             "cv_stage1_splits": int(cv1_splits),
             "cv_stage2_splits": int(cv2_splits),
             "catboost_categorical_columns": list(cat_cols_cb),
             "stage1_param_grid": param_grid_1,
-            "stage2_param_grid_base": param_grid_2,   # before merge with best1
+            "stage2_param_grid_base": param_grid_2,
             "final_iterations_cap": int(final_iterations),
             "early_stopping_rounds": int(early_stop),
+            "updates_latest": bool(should_update_latest(TRAIN_MODE)),
         }
-
         atomic_write_json(RUN_DIR / "run_info.json", run_info)
         print("📝 Wrote run metadata:", RUN_DIR / "run_info.json")
 
+        if TRAIN_MODE == "smoke":
+            atomic_write_bytes(
+                RUN_DIR / "SMOKE_RUN_DO_NOT_USE.txt",
+                b"This is a smoke test run. Do not use as production/latest.\n"
+            )
+
+        # --------------------------------------------
+        # Decide if allowed to touch GLOBAL
+        # --------------------------------------------
+        TOUCH_GLOBAL = (TRAIN_MODE == "full")
+
+        # Run-scoped stage files
+        s1 = _stage_paths(RUN_DIR, "stage1")
+        s2 = _stage_paths(RUN_DIR, "stage2")
+        sf = _stage_paths(RUN_DIR, "final")
 
         # -------------------------
         # Stage 1: coarse tuning
         # -------------------------
-        if STAGE1_DONE.exists() and STAGE1_PARAMS_PATH.exists() and not RETRAIN_CATBOOST:
-            print("✅ Stage 1 already done — loading best params.")
+        # Preference order for FULL mode:
+        #   (a) use global stage1 params if done and not retraining
+        #   (b) otherwise run stage1 and save to RUN_DIR (and global if FULL)
+        if TOUCH_GLOBAL and STAGE1_DONE.exists() and STAGE1_PARAMS_PATH.exists() and (not RETRAIN_CATBOOST):
+            print("✅ Stage 1 already done (GLOBAL) — loading best params.")
             best1 = json.loads(STAGE1_PARAMS_PATH.read_text())
+            # also write into run folder for auditability
+            atomic_write_json(s1["params"], best1)
+            mark_done(s1["done"], "ok (loaded global)")
         else:
             print("🧪 Stage 1: coarse tuning")
-            clear_file(STAGE1_DONE)
-            mark_in_progress(STAGE1_INPROGRESS, "stage1 started")
+            mark_in_progress(s1["inprog"], "stage1 started")
 
-            cv1 = KFold(n_splits=cv1_splits, shuffle=True, random_state=42)
+            if TOUCH_GLOBAL:
+                mark_in_progress(STAGE1_INPROGRESS, "stage1 started (global)")
 
-            cb_base = CatBoostRegressor(
-                loss_function="RMSE",
-                random_seed=42,
-                verbose=0,
-                allow_writing_files=False
-            )
+            try:
+                cv1 = KFold(n_splits=cv1_splits, shuffle=True, random_state=42)
 
-            gs1 = GridSearchCV(
-                estimator=cb_base,
-                param_grid=param_grid_1,
-                scoring="neg_root_mean_squared_error",
-                cv=cv1,
-                n_jobs=1,   # IMPORTANT: avoid nested parallelism
-                verbose=2
-            )
+                cb_base = CatBoostRegressor(
+                    loss_function="RMSE",
+                    random_seed=42,
+                    verbose=0,
+                    allow_writing_files=False
+                )
 
-            gs1.fit(X_train, y_train, cat_features=cat_cols_cb)
+                gs1 = GridSearchCV(
+                    estimator=cb_base,
+                    param_grid=param_grid_1,
+                    scoring="neg_root_mean_squared_error",
+                    cv=cv1,
+                    n_jobs=1,   
+                    verbose=2
+                )
 
-            best1 = gs1.best_params_
-            print("Stage 1 best params:", best1)
-            print("Stage 1 best CV RMSE (log):", -gs1.best_score_)
+                gs1.fit(X_train_cb, y_train_cb, cat_features=cat_cols_cb)
 
-            # Save stage 1 artifacts atomically
-            atomic_write_json(STAGE1_PARAMS_PATH, best1)
-            clear_file(STAGE1_INPROGRESS)
-            mark_done(STAGE1_DONE)
+                best1 = gs1.best_params_
+                print("Stage 1 best params:", best1)
+                print("Stage 1 best CV RMSE (log):", -gs1.best_score_)
 
-            # Also save a run-scoped copy for auditability
-            atomic_write_json(RUN_DIR / "stage1_best_params.json", best1)
+                # Always save run-scoped
+                atomic_write_json(s1["params"], best1)
+                mark_done(s1["done"])
+
+                # Only FULL updates global artifacts
+                if TOUCH_GLOBAL:
+                    atomic_write_json(STAGE1_PARAMS_PATH, best1)
+                    mark_done(STAGE1_DONE)
+
+            finally:
+                clear_file(s1["inprog"])
+                if TOUCH_GLOBAL:
+                    clear_file(STAGE1_INPROGRESS)
 
         # -------------------------
         # Stage 2: refinement
         # -------------------------
-        if STAGE2_DONE.exists() and STAGE2_PARAMS_PATH.exists() and not RETRAIN_CATBOOST:
-            print("✅ Stage 2 already done — loading refined params.")
+        if TOUCH_GLOBAL and STAGE2_DONE.exists() and STAGE2_PARAMS_PATH.exists() and (not RETRAIN_CATBOOST):
+            print("✅ Stage 2 already done (GLOBAL) — loading refined params.")
             best2 = json.loads(STAGE2_PARAMS_PATH.read_text())
+            atomic_write_json(s2["params"], best2)
+            mark_done(s2["done"], "ok (loaded global)")
         else:
             print("🧪 Stage 2: refinement")
-            clear_file(STAGE2_DONE)
-            mark_in_progress(STAGE2_INPROGRESS, "stage2 started")
+            mark_in_progress(s2["inprog"], "stage2 started")
 
-            cv2 = KFold(n_splits=cv2_splits, shuffle=True, random_state=42)
+            if TOUCH_GLOBAL:
+                mark_in_progress(STAGE2_INPROGRESS, "stage2 started (global)")
 
-            # Merge stage1 params into stage2 grid (keeps your same logic)
-            stage2_grid = {
-                "depth": [best1["depth"]],
-                "learning_rate": [best1["learning_rate"]],
-                "l2_leaf_reg": [best1["l2_leaf_reg"]],
-                **param_grid_2
-            }
+            try:
+                cv2 = KFold(n_splits=cv2_splits, shuffle=True, random_state=42)
 
-            cb_base2 = CatBoostRegressor(
+                stage2_grid = {
+                    "depth": [best1["depth"]],
+                    "learning_rate": [best1["learning_rate"]],
+                    "l2_leaf_reg": [best1["l2_leaf_reg"]],
+                    **param_grid_2
+                }
+
+                cb_base2 = CatBoostRegressor(
+                    loss_function="RMSE",
+                    random_seed=42,
+                    verbose=0,
+                    allow_writing_files=False
+                )
+
+                gs2 = GridSearchCV(
+                    estimator=cb_base2,
+                    param_grid=stage2_grid,
+                    scoring="neg_root_mean_squared_error",
+                    cv=cv2,
+                    n_jobs=1,
+                    verbose=2
+                )
+
+                gs2.fit(X_train_cb, y_train_cb, cat_features=cat_cols_cb)
+
+                best2 = gs2.best_params_
+                best_cb = gs2.best_estimator_
+
+                print("Stage 2 best params:", best2)
+                print("Stage 2 best CV RMSE (log):", -gs2.best_score_)
+
+                y_pred_log = best_cb.predict(X_val_cb)
+                y_pred = np.expm1(y_pred_log)
+                y_true = np.expm1(y_val_cb)
+
+                mae_cv = mean_absolute_error(y_true, y_pred)
+                rmse_cv = np.sqrt(mean_squared_error(y_true, y_pred))
+
+                print(f"CV-BEST VAL MAE ($):  {mae_cv:,.0f}")
+                print(f"CV-BEST VAL RMSE ($): {rmse_cv:,.0f}")
+
+                atomic_write_json(s2["params"], best2)
+                mark_done(s2["done"])
+
+                if TOUCH_GLOBAL:
+                    atomic_write_json(STAGE2_PARAMS_PATH, best2)
+                    mark_done(STAGE2_DONE)
+
+            finally:
+                clear_file(s2["inprog"])
+                if TOUCH_GLOBAL:
+                    clear_file(STAGE2_INPROGRESS)
+
+        # -------------------------
+        # Stage 3: final refit + early stopping on VAL
+        # -------------------------
+        print("🏁 Stage 3: final refit with early stopping (VAL)")
+        mark_in_progress(sf["inprog"], "final refit started")
+
+        if TOUCH_GLOBAL:
+            mark_in_progress(FINAL_INPROGRESS, "final refit started (global)")
+
+        try:
+            final_params = best2.copy()
+            final_params["iterations"] = final_iterations  # cap; early stopping decides
+
+            final_cb = CatBoostRegressor(
+                **final_params,
                 loss_function="RMSE",
                 random_seed=42,
-                verbose=0,
+                verbose=200,
                 allow_writing_files=False
             )
 
-            gs2 = GridSearchCV(
-                estimator=cb_base2,
-                param_grid=stage2_grid,
-                scoring="neg_root_mean_squared_error",
-                cv=cv2,
-                n_jobs=1,
-                verbose=2
+            final_cb.fit(
+                X_train_cb, y_train_cb,
+                cat_features=cat_cols_cb,
+                eval_set=(X_val_cb, y_val_cb),         
+                early_stopping_rounds=early_stop,
+                use_best_model=True
             )
 
-            gs2.fit(X_train, y_train, cat_features=cat_cols_cb)
+            assert final_cb.is_fitted(), "CatBoost model not fitted; refusing to save."
+            print("Best iteration:", final_cb.get_best_iteration())
 
-            best2 = gs2.best_params_
-            best_cb = gs2.best_estimator_  # ✅ this is the fitted model to evaluate
+            # Save feature columns
+            atomic_write_json(RUN_DIR / "feature_columns.json", list(X_train_cb.columns))
+            if TOUCH_GLOBAL:
+                atomic_write_json(FEATURE_COLS_PATH, list(X_train_cb.columns))
 
-            print("Stage 2 best params:", best2)
-            print("Stage 2 best CV RMSE (log):", -gs2.best_score_)
+            # Save params
+            atomic_write_json(sf["params"], final_params)            # run-scoped
+            atomic_write_json(RUN_DIR / "final_params.json", final_params)  # same, explicit
+            if TOUCH_GLOBAL:
+                atomic_write_json(FINAL_PARAMS_PATH, final_params)
 
-            # -------------------------
-            # Evaluate the CV-selected estimator (no early stopping)
-            # -------------------------
-            y_pred_log = best_cb.predict(X_test)  # ✅ was best2.predict(...)
-            y_pred = np.expm1(y_pred_log)
-            y_true = np.expm1(y_test)
+            # Save model versioned always
+            versioned_model_path = RUN_DIR / "catboost_final.cbm"
+            final_cb.save_model(str(versioned_model_path))
 
-            mae_cv = mean_absolute_error(y_true, y_pred)
-            rmse_cv = np.sqrt(mean_squared_error(y_true, y_pred))
+            # Only FULL updates "latest"
+            if should_update_latest(TRAIN_MODE):
+                final_cb.save_model(str(CATBOOST_FINAL_PATH))
+                print("✅ Updated latest:", CATBOOST_FINAL_PATH)
+            else:
+                print("🚫 Smoke run: NOT updating latest pointer.")
 
-            print(f"CV-BEST TEST MAE ($):  {mae_cv:,.0f}")
-            print(f"CV-BEST TEST RMSE ($): {rmse_cv:,.0f}")
+            mark_done(sf["done"])
 
-            atomic_write_json(STAGE2_PARAMS_PATH, best2)
-            clear_file(STAGE2_INPROGRESS)
-            mark_done(STAGE2_DONE)
-            atomic_write_json(RUN_DIR / "stage2_best_params.json", best2)
+            if TOUCH_GLOBAL:
+                mark_done(FINAL_DONE)
 
-        # -------------------------
-        # Stage 3: final refit + early stopping
-        # -------------------------
-        print("🏁 Stage 3: final refit with early stopping")
-        clear_file(FINAL_DONE)
-        mark_in_progress(FINAL_INPROGRESS, "final refit started")
+            print("💾 Saved CatBoost model:")
+            print("  - Latest:", CATBOOST_FINAL_PATH)
+            print("  - Versioned:", versioned_model_path)
+            print("  - Run folder:", RUN_DIR)
 
-        final_params = best2.copy()
-        final_params["iterations"] = final_iterations  # cap; early stopping decides
-
-        final_cb = CatBoostRegressor(
-            **final_params,
-            loss_function="RMSE",
-            random_seed=42,
-            verbose=200,
-            allow_writing_files=False
-        )
-
-        final_cb.fit(
-            X_train, y_train,
-            cat_features=cat_cols_cb,
-            eval_set=(X_test, y_test),
-            early_stopping_rounds=early_stop,
-            use_best_model=True
-        )
-
-        assert final_cb.is_fitted(), "CatBoost model not fitted; refusing to save."
-        print("Best iteration:", final_cb.get_best_iteration())
-
-        # Save feature columns (for consistent inference later)
-        atomic_write_json(FEATURE_COLS_PATH, list(X_train.columns))
-        atomic_write_json(RUN_DIR / "feature_columns.json", list(X_train.columns))
-
-        # Save params
-        atomic_write_json(FINAL_PARAMS_PATH, final_params)
-        atomic_write_json(RUN_DIR / "final_params.json", final_params)
-
-        # Save model versioned + latest
-        versioned_model_path = RUN_DIR / "catboost_final.cbm"
-        final_cb.save_model(str(versioned_model_path))
-        final_cb.save_model(str(CATBOOST_FINAL_PATH))
-
-        # Done markers
-        clear_file(FINAL_INPROGRESS)
-        mark_done(FINAL_DONE)
-        mark_done(RUN_DIR / "catboost_done.txt")
-
-        print("💾 Saved CatBoost model:")
-        print("  - Latest:", CATBOOST_FINAL_PATH)
-        print("  - Versioned:", versioned_model_path)
-        print("  - Run folder:", RUN_DIR)
+        finally:
+            clear_file(sf["inprog"])
+            if TOUCH_GLOBAL:
+                clear_file(FINAL_INPROGRESS)
 ```
 
+#### Catboost Evaluation
 ```{python}
+# ==========================================================
+# CATBOOST EVALUATION
+# ==========================================================
 if final_cb is None:
     print("⚠️ CatBoost model not available — skipping evaluation.")
 else:
-    # Ensure you have X_train/X_test/y_train/y_test in scope
-    # If you loaded the model without training in this session, rebuild the split:
-    if "X_test" not in globals():
-        X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+    # Predict
+    cb_pred_log_test = final_cb.predict(X_test)
+    cb_pred_test = np.expm1(cb_pred_log_test)
+    cb_true_test = np.expm1(y_test)
 
-    # ✅ Predict in log space, then exponentiate once
-    y_pred_log = final_cb.predict(X_test)
-    y_pred = np.expm1(y_pred_log)
-    y_true = np.expm1(y_test)
+    cb_mae_test = mean_absolute_error(cb_true_test, cb_pred_test)
+    cb_rmse_test = np.sqrt(mean_squared_error(cb_true_test, cb_pred_test))
 
-    mae_test = mean_absolute_error(y_true, y_pred)
-    rmse_test = np.sqrt(mean_squared_error(y_true, y_pred))
-
-    print(f"FINAL TEST MAE ($):  {mae_test:,.0f}")
-    print(f"FINAL TEST RMSE ($): {rmse_test:,.0f}")
+    print(f"CATBOOST TEST MAE ($):  {cb_mae_test:,.0f}")
+    print(f"CATBOOST TEST RMSE ($): {cb_rmse_test:,.0f}")
     print("Best iteration:", final_cb.get_best_iteration())
 
-    # Train vs Test table
-    y_train_pred_log = final_cb.predict(X_train)
-    y_train_pred = np.expm1(y_train_pred_log)
-    y_train_true = np.expm1(y_train)
+    # Train+Val metrics for comparison
+    X_trainval_cb = pd.concat([X_train, X_val], axis=0)
+    y_trainval_cb = pd.concat([y_train, y_val], axis=0)
 
-    train_mae_cb = mean_absolute_error(y_train_true, y_train_pred)
-    train_rmse_cb = np.sqrt(mean_squared_error(y_train_true, y_train_pred))
+    cb_pred_log_trainval = final_cb.predict(X_trainval_cb)
+    cb_pred_trainval = np.expm1(cb_pred_log_trainval)
+    cb_true_trainval = np.expm1(y_trainval_cb)
+
+    cb_mae_trainval = mean_absolute_error(cb_true_trainval, cb_pred_trainval)
+    cb_rmse_trainval = np.sqrt(mean_squared_error(cb_true_trainval, cb_pred_trainval))
 
     results_cb = pd.DataFrame(
-        {"MAE ($)": [train_mae_cb, mae_test], "RMSE ($)": [train_rmse_cb, rmse_test]},
-        index=["Train", "Test"]
+        {"MAE ($)": [cb_mae_trainval, cb_mae_test],
+         "RMSE ($)": [cb_rmse_trainval, cb_rmse_test]},
+        index=["Train+Val", "Test"]
     )
-    print(results_cb)
+    display(results_cb)
 
-    # Feature Importance (CatBoost)
+    # Feature Importance
     importances = final_cb.get_feature_importance()
     fi = (
         pd.DataFrame({"feature": X_train.columns, "importance": importances})
         .sort_values("importance", ascending=False)
     )
-    print(fi.head(25))
+    display(fi.head(25))
+```
+
+### Keras Neural Network
+```{python}
 
 ```
 
-## Save CatBoost model + metadata checkpoint
+```{python}
 
+```
+
+```{python}
+
+```
+
+### Metrics Savepoint
 ```{python}
 # =========================
 # Save Metrics
@@ -1266,55 +1508,336 @@ else:
 
 metrics = {}
 
+metrics["_meta"] = {
+    "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+    "train_mode": TRAIN_MODE if "TRAIN_MODE" in globals() else None,
+    "updates_latest": (TRAIN_MODE == "full") if "TRAIN_MODE" in globals() else None,
+    "rows": {
+        "train": int(len(X_train)) if "X_train" in globals() else None,
+        "val": int(len(X_val)) if "X_val" in globals() else None,
+        "test": int(len(X_test)) if "X_test" in globals() else None,
+        "total": int(len(X)) if "X" in globals() else None,
+    }
+}
+
 # ---------- Ridge metrics ----------
-# Only save if the ridge metrics variables exist
-ridge_vars_exist = all(name in globals() for name in ["train_mae", "train_rmse", "mae", "rmse"])
+ridge_vars_exist = all(name in globals() for name in [
+    "ridge_mae_trainval", "ridge_rmse_trainval", "ridge_mae_test", "ridge_rmse_test"
+])
 
 if ridge_vars_exist:
     metrics["ridge"] = {
-        "train_mae": float(train_mae),
-        "train_rmse": float(train_rmse),
-        "test_mae": float(mae),
-        "test_rmse": float(rmse),
+        "trainval_mae": float(ridge_mae_trainval),
+        "trainval_rmse": float(ridge_rmse_trainval),
+        "test_mae": float(ridge_mae_test),
+        "test_rmse": float(ridge_rmse_test),
     }
 else:
-    print("ℹ️ Skipping Ridge metrics write (train_mae/train_rmse/mae/rmse not all defined yet).")
+    print("ℹ️ Skipping Ridge metrics write (need ridge_mae_trainval/ridge_rmse_trainval/ridge_mae_test/ridge_rmse_test).")
 
 # ---------- CatBoost metrics ----------
-cat_vars_exist = all(name in globals() for name in ["train_mae_cb", "train_rmse_cb", "mae_test", "rmse_test"])
+cb_vars_exist = all(name in globals() for name in [
+    "cb_mae_trainval", "cb_rmse_trainval", "cb_mae_test", "cb_rmse_test"
+])
 
-if cat_vars_exist:
+if cb_vars_exist:
     metrics["catboost"] = {
-        "train_mae": float(train_mae_cb),
-        "train_rmse": float(train_rmse_cb),
-        "test_mae": float(mae_test),
-        "test_rmse": float(rmse_test),
+        "trainval_mae": float(cb_mae_trainval),
+        "trainval_rmse": float(cb_rmse_trainval),
+        "test_mae": float(cb_mae_test),
+        "test_rmse": float(cb_rmse_test),
         "best_iteration": int(final_cb.get_best_iteration()) if ("final_cb" in globals() and final_cb is not None) else None,
         "run_dir": str(RUN_DIR) if "RUN_DIR" in globals() else None,
     }
-else:
-    print("ℹ️ Skipping CatBoost metrics write (train_mae_cb/train_rmse_cb/mae_test/rmse_test not all defined yet).")
 
-# Always write whatever we have (even if partial)
+    if all(name in globals() for name in ["mae_cv", "rmse_cv"]):
+        metrics["catboost"]["val_mae_cvbest"] = float(mae_cv)
+        metrics["catboost"]["val_rmse_cvbest"] = float(rmse_cv)
+
+else:
+    print("ℹ️ Skipping CatBoost metrics write (need cb_mae_trainval/cb_rmse_trainval/cb_mae_test/cb_rmse_test).")
+
+# ---------- Write files ----------
 metrics_ts = datetime.now().strftime("%Y%m%d_%H%M%S")
 METRICS_VERSIONED_PATH = METRICS_DIR / f"metrics_{metrics_ts}.json"
 
 atomic_write_json(METRICS_PATH, metrics)
 print("🧾 Wrote metrics:", METRICS_PATH)
 
-# Versioned snapshot
 atomic_write_json(METRICS_VERSIONED_PATH, metrics)
+print("🧾 Wrote versioned metrics:", METRICS_VERSIONED_PATH)
 
 # Run-specific metrics (only if RUN_DIR exists)
-if "RUN_DIR" in globals():
+if "RUN_DIR" in globals() and RUN_DIR is not None:
     atomic_write_json(RUN_DIR / "metrics.json", metrics)
     print("🧾 Wrote run metrics:", RUN_DIR / "metrics.json")
-
 ```
 
-## Keras Neural Network
-```{python}
+### Model Comparison Graphs
 
+#### Plotting Functions for Models
+```{python}
+# =========================
+# Plot Function 1
+# =========================
+
+def clip_by_quantile(y_true, y_pred, q_low=0.01, q_high=0.99):
+    y_true = np.asarray(y_true)
+    y_pred = np.asarray(y_pred)
+    lo, hi = np.quantile(y_true, [q_low, q_high])
+    mask = (y_true >= lo) & (y_true <= hi)
+    return y_true[mask], y_pred[mask], mask, (lo, hi)
+
+# =========================
+# Plot Function 2
+# =========================
+
+def plot_regression_diagnostics(
+    y_true, y_pred,
+    X_ref=None, feature_for_residual="age",
+    clip=False, q_low=0.01, q_high=0.99,
+    title_prefix=""
+):
+    """
+    Plots:
+      1) Predicted vs Actual
+      2) Residuals vs Predicted
+      3) Residuals vs a chosen feature (e.g. age or mileage)
+      
+    Clips by y_true quantiles for readability for some charts.
+    """
+    y_true = np.asarray(y_true)
+    y_pred = np.asarray(y_pred)
+
+    if clip:
+        y_true_p, y_pred_p, mask, (lo, hi) = clip_by_quantile(y_true, y_pred, q_low, q_high)
+        label_suffix = f" (clipped {int(q_low*100)}–{int(q_high*100)}% of y_true)"
+    else:
+        y_true_p, y_pred_p = y_true, y_pred
+        mask = None
+        label_suffix = " (unclipped)"
+
+    # 1) Predicted vs Actual
+    plt.figure(figsize=(6, 6))
+    plt.scatter(y_true_p, y_pred_p, alpha=0.2)
+    mn = min(y_true_p.min(), y_pred_p.min())
+    mx = max(y_true_p.max(), y_pred_p.max())
+    plt.plot([mn, mx], [mn, mx], "r--")
+    plt.xlabel("Actual Price ($)")
+    plt.ylabel("Predicted Price ($)")
+    plt.title(f"{title_prefix} Predicted vs Actual{label_suffix}")
+    plt.tight_layout()
+    plt.show()
+
+    residuals = y_true_p - y_pred_p
+
+    # 2) Residuals vs Predicted
+    plt.figure(figsize=(6, 4))
+    plt.scatter(y_pred_p, residuals, alpha=0.2)
+    plt.axhline(0, color="red", linestyle="--")
+    plt.xlabel("Predicted Price ($)")
+    plt.ylabel("Residual ($)  (actual - predicted)")
+    plt.title(f"{title_prefix} Residuals vs Predicted{label_suffix}")
+    plt.tight_layout()
+    plt.show()
+
+    # 3) Residuals vs Feature
+    if X_ref is not None and feature_for_residual in X_ref.columns:
+        if mask is not None:
+            # mask aligns to y_true/y_pred order; apply same mask to X_ref
+            x_feat = np.asarray(X_ref[feature_for_residual])[mask]
+        else:
+            x_feat = np.asarray(X_ref[feature_for_residual])
+
+        plt.figure(figsize=(6, 4))
+        plt.scatter(x_feat, residuals, alpha=0.2)
+        plt.axhline(0, color="red", linestyle="--")
+        plt.xlabel(feature_for_residual)
+        plt.ylabel("Residual ($)")
+        plt.title(f"{title_prefix} Residuals vs {feature_for_residual}{label_suffix}")
+        plt.tight_layout()
+        plt.show()
+
+# =========================
+# Plot Function 3
+# =========================
+
+def plot_abs_error_vs_actual(
+    y_true, y_pred,
+    clip=False, q_low=0.01, q_high=0.99,
+    title_prefix="",
+    log_x=True
+):
+    """
+    Plot absolute error vs actual price.
+    Clip based on y_true quantiles for readability (optional).
+    Log-scale the x-axis (actual price).
+    """
+    y_true = np.asarray(y_true)
+    y_pred = np.asarray(y_pred)
+
+    if clip:
+        y_true_p, y_pred_p, _, _ = clip_by_quantile(y_true, y_pred, q_low, q_high)
+        label_suffix = f" (clipped {int(q_low*100)}–{int(q_high*100)}% of y_true)"
+    else:
+        y_true_p, y_pred_p = y_true, y_pred
+        label_suffix = " (unclipped)"
+
+    abs_err = np.abs(y_true_p - y_pred_p)
+
+    plt.figure(figsize=(6, 4))
+    plt.scatter(y_true_p, abs_err, alpha=0.2)
+    plt.ylabel("Absolute Error ($)")
+    plt.title(f"{title_prefix} Absolute Error vs Actual{label_suffix}")
+    if log_x:
+        plt.xscale("log")
+        plt.xlabel("Actual Price ($) [log scale]")
+    else:
+        plt.xlabel("Actual Price ($)")
+    plt.tight_layout()
+    plt.show()
+
+# =========================
+# Plot Function 4
+# =========================
+
+def plot_pred_vs_pred(
+    pred_a, pred_b,
+    *,
+    name_a="Model A",
+    name_b="Model B",
+    clip_by_y_true=None,   # pass y_true array to clip both preds by y_true quantiles
+    clip=False,
+    q_low=0.01,
+    q_high=0.99
+):
+    """
+    Scatter of predictions from two models against each other.
+    Clipping is based on y_true quantiles (optional).
+    """
+    pred_a = np.asarray(pred_a)
+    pred_b = np.asarray(pred_b)
+
+    if clip:
+        if clip_by_y_true is None:
+            raise ValueError("clip=True requires clip_by_y_true (the y_true array).")
+        y_true = np.asarray(clip_by_y_true)
+        _, _, mask, _ = clip_by_quantile(y_true, pred_a, q_low=q_low, q_high=q_high)
+        pred_a_p = pred_a[mask]
+        pred_b_p = pred_b[mask]
+        suffix = f" (clipped {int(q_low*100)}–{int(q_high*100)}% of y_true)"
+    else:
+        pred_a_p, pred_b_p = pred_a, pred_b
+        suffix = " (unclipped)"
+
+    plt.figure(figsize=(6, 6))
+    plt.scatter(pred_a_p, pred_b_p, alpha=0.2)
+    mn = min(pred_a_p.min(), pred_b_p.min())
+    mx = max(pred_a_p.max(), pred_b_p.max())
+    plt.plot([mn, mx], [mn, mx], "r--")
+    plt.xlabel(f"{name_a} Predicted Price ($)")
+    plt.ylabel(f"{name_b} Predicted Price ($)")
+    plt.title(f"{name_a} vs {name_b} Predictions{suffix}")
+    plt.tight_layout()
+    plt.show()
+```
+
+#### Model Graph Section
+```{python}
+# =========================
+# Model Comparison Plots -- using test set
+# =========================
+
+if ("X_test" not in globals()) or ("y_test" not in globals()):
+    print("⚠️ X_test/y_test not found — cannot plot comparisons.")
+else:
+    # True dollars for the test set
+    y_true_test = np.expm1(y_test)
+
+    # Choose feature for residual-vs-feature
+    feature_name = "age" if "age" in X_test.columns else ("mileage" if "mileage" in X_test.columns else None)
+
+    # ----------------------------------------------------------
+    # Collect predictions from any models that exist
+    # (Add Keras later)
+    # ----------------------------------------------------------
+    preds = {}
+
+    if ("best_ridge" in globals()) and (best_ridge is not None):
+        preds["Ridge"] = np.expm1(best_ridge.predict(X_test))
+    else:
+        print("ℹ️ Ridge not available — skipping Ridge plots.")
+
+    if ("final_cb" in globals()) and (final_cb is not None):
+        preds["CatBoost"] = np.expm1(final_cb.predict(X_test))
+    else:
+        print("ℹ️ CatBoost not available — skipping CatBoost plots.")
+
+    # [FUTURE] Keras — just add later:
+    # if ("keras_model" in globals()) and (keras_model is not None):
+    #     y_pred_log_keras = keras_model.predict(X_test_keras).ravel()  # log1p predictions
+    #     preds["Keras"] = np.expm1(y_pred_log_keras)
+
+    if len(preds) == 0:
+        print("⚠️ No model predictions available — nothing to plot.")
+    else:
+        # ----------------------------------------------------------
+        # 3 diagnostic plots + abs error plot for each model
+        # (unclipped + clipped)
+        # ----------------------------------------------------------
+        for name, y_pred in preds.items():
+            plot_regression_diagnostics(
+                y_true_test, y_pred,
+                X_ref=X_test,
+                feature_for_residual=(feature_name or "age"),
+                clip=False,
+                title_prefix=f"{name} |"
+            )
+            plot_regression_diagnostics(
+                y_true_test, y_pred,
+                X_ref=X_test,
+                feature_for_residual=(feature_name or "age"),
+                clip=True, q_low=0.01, q_high=0.99,
+                title_prefix=f"{name} |"
+            )
+
+            plot_abs_error_vs_actual(
+                y_true_test, y_pred,
+                clip=False,
+                title_prefix=f"{name} |",
+                log_x=True
+            )
+            plot_abs_error_vs_actual(
+                y_true_test, y_pred,
+                clip=True, q_low=0.01, q_high=0.99,
+                title_prefix=f"{name} |",
+                log_x=True
+            )
+
+        # ----------------------------------------------------------
+        # 4th plot: pred vs pred for every pair of models
+        # (unclipped + clipped)
+        # ----------------------------------------------------------
+        model_names = list(preds.keys())
+        if len(model_names) >= 2:
+            for i in range(len(model_names)):
+                for j in range(i + 1, len(model_names)):
+                    a = model_names[i]
+                    b = model_names[j]
+
+                    plot_pred_vs_pred(
+                        preds[a], preds[b],
+                        name_a=a, name_b=b,
+                        clip=False
+                    )
+                    plot_pred_vs_pred(
+                        preds[a], preds[b],
+                        name_a=a, name_b=b,
+                        clip_by_y_true=y_true_test,
+                        clip=True, q_low=0.01, q_high=0.99
+                    )
+        else:
+            print("ℹ️ Only one model available — skipping pred-vs-pred comparison plots.")
 ```
 
 ```{python}

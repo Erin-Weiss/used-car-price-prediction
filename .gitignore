@@ -21,6 +21,7 @@ models/
 # OS
 .DS_Store
 
+#Random
 requirements.freeze.txt
-
 render.log
+.vscode
