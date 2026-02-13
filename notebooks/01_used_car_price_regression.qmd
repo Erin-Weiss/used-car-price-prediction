@@ -65,7 +65,7 @@ import joblib
 RETRAIN_RIDGE = True
 
 RETRAIN_CATBOOST = True
-TRAIN_MODE = "smoke"   # "smoke" | "full" | "skip"
+TRAIN_MODE = "full"   # "smoke" | "full" | "skip"
 
 RETRAIN_KERAS = False
 
