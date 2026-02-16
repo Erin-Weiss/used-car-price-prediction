@@ -1,6 +1,7 @@
 # Python
 __pycache__/
 *.pyc
+.ipynb_checkpoints/
 
 # Environments
 .venv/
@@ -25,3 +26,4 @@ models/
 requirements.freeze.txt
 render.log
 .vscode
+/notes

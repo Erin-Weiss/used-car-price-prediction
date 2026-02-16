@@ -59,15 +59,17 @@ from sklearn.metrics import mean_absolute_error, mean_squared_error
 from catboost import CatBoostRegressor
 import joblib
 
+import tensorflow as tf
+from tensorflow import keras
+from tensorflow.keras import layers
 # ===============================
 # Training control flags
 # ===============================
-RETRAIN_RIDGE = True
+TRAIN_MODE = "smoke"   # "smoke" | "full" | "skip"
 
-RETRAIN_CATBOOST = True
-TRAIN_MODE = "full"   # "smoke" | "full" | "skip"
-
-RETRAIN_KERAS = False
+RETRAIN_RIDGE = False
+RETRAIN_CATBOOST = False
+RETRAIN_KERAS = True
 
 # ===============================
 # Paths section
@@ -172,6 +174,16 @@ def mark_in_progress(path: Path, text: str = "in_progress"):
 def clear_file(path: Path):
     if path.exists():
         path.unlink()
+
+# ----------------------------
+# Keras artifact paths
+# ----------------------------
+KERAS_DIR = MODEL_DIR / "keras"
+KERAS_DIR.mkdir(parents=True, exist_ok=True)
+
+KERAS_LATEST_PATH = KERAS_DIR / "keras_model.keras"      # "latest" pointer
+KERAS_RUNS_DIR = KERAS_DIR 
+KERAS_RUNS_DIR.mkdir(parents=True, exist_ok=True)
 
 # ===============================
 # Metrics artifact paths
@@ -836,6 +848,84 @@ def load_model_or_warn(path, loader, name):
     return None
 ```
 
+```{python}
+def rmse(y_true, y_pred) -> float:
+    return float(np.sqrt(mean_squared_error(y_true, y_pred)))
+
+def regression_metrics(y_true, y_pred) -> dict:
+    y_true = np.asarray(y_true)
+    y_pred = np.asarray(y_pred)
+    return {
+        "mae": float(mean_absolute_error(y_true, y_pred)),
+        "rmse": rmse(y_true, y_pred),
+        "median_ae": float(np.median(np.abs(y_true - y_pred))),
+        "n": int(len(y_true)),
+    }
+
+def clipped_mask_by_y_true(y_true, q_low=0.01, q_high=0.99):
+    """
+    Mask rows where y_true is within [q_low, q_high] quantiles.
+    Clipping is based ONLY on y_true (never on predictions).
+    """
+    y_true = np.asarray(y_true)
+    lo, hi = np.quantile(y_true, [q_low, q_high])
+    mask = (y_true >= lo) & (y_true <= hi)
+    return mask, float(lo), float(hi)
+
+def metrics_full_and_clipped(y_true, y_pred, q_low=0.01, q_high=0.99) -> dict:
+    """
+    Returns metrics for:
+      - full set
+      - clipped set (based on y_true quantiles)
+    """
+    y_true = np.asarray(y_true)
+    y_pred = np.asarray(y_pred)
+
+    out = {}
+    out["full"] = regression_metrics(y_true, y_pred)
+
+    mask, lo, hi = clipped_mask_by_y_true(y_true, q_low=q_low, q_high=q_high)
+    out["clipped"] = regression_metrics(y_true[mask], y_pred[mask])
+    out["clipped"]["clip_q_low"] = float(q_low)
+    out["clipped"]["clip_q_high"] = float(q_high)
+    out["clipped"]["clip_lo"] = lo
+    out["clipped"]["clip_hi"] = hi
+    return out
+
+def metrics_to_df(metrics_dict, model_name: str) -> pd.DataFrame:
+    """
+    Convert output from metrics_full_and_clipped into a pretty DataFrame.
+    """
+    rows = []
+    for view in ["full", "clipped"]:
+        m = metrics_dict[view]
+        rows.append({
+            "model": model_name,
+            "view": view,
+            "n": m["n"],
+            "MAE ($)": m["mae"],
+            "RMSE ($)": m["rmse"],
+            "MedianAE ($)": m["median_ae"],
+            **({} if view == "full" else {
+                "clip_lo($)": m["clip_lo"],
+                "clip_hi($)": m["clip_hi"],
+                "q_low": m["clip_q_low"],
+                "q_high": m["clip_q_high"],
+            })
+        })
+    df = pd.DataFrame(rows).set_index(["model", "view"])
+    return df
+
+def show_metrics_table(name, y_true_dollars, y_pred_dollars):
+    m = metrics_full_and_clipped(y_true_dollars, y_pred_dollars, 0.01, 0.99)
+    df = pd.DataFrame([
+        {"model": name, "view": "full", **m["full"]},
+        {"model": name, "view": "clipped", **m["clipped"]},
+    ]).set_index(["model", "view"])
+    display(df)
+    return m
+```
+
 ### Ridge Regression (Pipeline + Grid Search)
 
 #### Ridge Training
@@ -960,11 +1050,16 @@ else:
     ridge_pred_test = np.expm1(ridge_pred_log_test)
     ridge_true_test = np.expm1(y_test)
 
+    # Do I/Can I remove this part?
     ridge_mae_test = mean_absolute_error(ridge_true_test, ridge_pred_test)
     ridge_rmse_test = np.sqrt(mean_squared_error(ridge_true_test, ridge_pred_test))
 
     print(f"RIDGE TEST MAE ($):  {ridge_mae_test:,.0f}")
     print(f"RIDGE TEST RMSE ($): {ridge_rmse_test:,.0f}")
+
+    # New Part
+    ridge_m = metrics_full_and_clipped(ridge_true_test, ridge_pred_test, q_low=0.01, q_high=0.99)
+    display(metrics_to_df(ridge_m, "Ridge"))
 
     try:
         prep = best_ridge.named_steps["prep"]
@@ -1003,6 +1098,7 @@ else:
     ridge_pred_trainval = np.expm1(best_ridge.predict(X_trainval))
     ridge_true_trainval = np.expm1(y_trainval)
 
+    # Do I replace this? 
     ridge_mae_trainval = mean_absolute_error(ridge_true_trainval, ridge_pred_trainval)
     ridge_rmse_trainval = np.sqrt(mean_squared_error(ridge_true_trainval, ridge_pred_trainval))
 
@@ -1012,6 +1108,14 @@ else:
         index=["Train+Val", "Test"]
     )
     display(results_ridge)
+
+    # New Part 
+    ridge_pred_trainval = np.expm1(best_ridge.predict(X_trainval))
+    ridge_true_trainval = np.expm1(y_trainval)
+
+    ridge_tv = metrics_full_and_clipped(ridge_true_trainval, ridge_pred_trainval, q_low=0.01, q_high=0.99)
+    display(metrics_to_df(ridge_tv, "Ridge (Train+Val)"))
+
 
     # Largest abs residuals on Train+Val
     ridge_residuals_trainval = ridge_true_trainval - ridge_pred_trainval
@@ -1448,11 +1552,47 @@ else:
 if final_cb is None:
     print("⚠️ CatBoost model not available — skipping evaluation.")
 else:
+    # ----------------------------
+    # NEW: TRAIN split metrics
+    # ----------------------------
+    cb_pred_log_train = final_cb.predict(X_train)
+    cb_pred_train = np.expm1(cb_pred_log_train)
+    cb_true_train = np.expm1(y_train)
+
+    cb_mae_train = mean_absolute_error(cb_true_train, cb_pred_train)
+    cb_rmse_train = np.sqrt(mean_squared_error(cb_true_train, cb_pred_train))
+
+    print(f"CATBOOST TRAIN MAE ($):  {cb_mae_train:,.0f}")
+    print(f"CATBOOST TRAIN RMSE ($): {cb_rmse_train:,.0f}")
+
+    cb_tr = metrics_full_and_clipped(cb_true_train, cb_pred_train, q_low=0.01, q_high=0.99)
+    display(metrics_to_df(cb_tr, "CatBoost (Train)"))
+
+    # ----------------------------
+    # NEW: VAL split metrics (early-stopping set)
+    # ----------------------------
+    cb_pred_log_val = final_cb.predict(X_val)
+    cb_pred_val = np.expm1(cb_pred_log_val)
+    cb_true_val = np.expm1(y_val)
+
+    cb_mae_val = mean_absolute_error(cb_true_val, cb_pred_val)
+    cb_rmse_val = np.sqrt(mean_squared_error(cb_true_val, cb_pred_val))
+
+    print(f"CATBOOST VAL MAE ($):  {cb_mae_val:,.0f}")
+    print(f"CATBOOST VAL RMSE ($): {cb_rmse_val:,.0f}")
+
+    cb_v = metrics_full_and_clipped(cb_true_val, cb_pred_val, q_low=0.01, q_high=0.99)
+    display(metrics_to_df(cb_v, "CatBoost (Val)"))
+
+    # ----------------------------
+    # EXISTING: TEST split metrics
+    # ----------------------------
     # Predict
     cb_pred_log_test = final_cb.predict(X_test)
     cb_pred_test = np.expm1(cb_pred_log_test)
     cb_true_test = np.expm1(y_test)
 
+    # Old part
     cb_mae_test = mean_absolute_error(cb_true_test, cb_pred_test)
     cb_rmse_test = np.sqrt(mean_squared_error(cb_true_test, cb_pred_test))
 
@@ -1460,7 +1600,13 @@ else:
     print(f"CATBOOST TEST RMSE ($): {cb_rmse_test:,.0f}")
     print("Best iteration:", final_cb.get_best_iteration())
 
-    # Train+Val metrics for comparison
+    # New Part
+    cb_m = metrics_full_and_clipped(cb_true_test, cb_pred_test, q_low=0.01, q_high=0.99)
+    display(metrics_to_df(cb_m, "CatBoost"))
+
+    # ----------------------------
+    # EXISTING: Train+Val metrics for comparison
+    # ----------------------------
     X_trainval_cb = pd.concat([X_train, X_val], axis=0)
     y_trainval_cb = pd.concat([y_train, y_val], axis=0)
 
@@ -1468,6 +1614,7 @@ else:
     cb_pred_trainval = np.expm1(cb_pred_log_trainval)
     cb_true_trainval = np.expm1(y_trainval_cb)
 
+    # Old
     cb_mae_trainval = mean_absolute_error(cb_true_trainval, cb_pred_trainval)
     cb_rmse_trainval = np.sqrt(mean_squared_error(cb_true_trainval, cb_pred_trainval))
 
@@ -1477,6 +1624,10 @@ else:
         index=["Train+Val", "Test"]
     )
     display(results_cb)
+
+    # New
+    cb_tv = metrics_full_and_clipped(cb_true_trainval, cb_pred_trainval, q_low=0.01, q_high=0.99)
+    display(metrics_to_df(cb_tv, "CatBoost (Train+Val)"))
 
     # Feature Importance
     importances = final_cb.get_feature_importance()
@@ -1488,23 +1639,376 @@ else:
 ```
 
 ### Keras Neural Network
+
+#### Keras Setup
 ```{python}
+# ----------------------------
+# Step 0: Reproducibility
+# ----------------------------
+SEED = 42
+tf.keras.utils.set_random_seed(SEED)
+np.random.seed(SEED)
+
+# ----------------------------
+# Step 1: Define feature columns
+# ----------------------------
+num_cols = [
+    "mileage", "mpg_avg", "price_drop", "seller_rating", "driver_rating",
+    "driver_reviews_num", "accidents_or_damage", "one_owner", "personal_use_only",
+    "age", "mileage_per_year", "engine_liters", "engine_cylinders",
+    "engine_turbo", "engine_hybrid", "transmission_gears", "transmission_gears_missing",
+    "is_luxury_brand",
+]
+cat_cols = [
+    "manufacturer", "model", "drivetrain", "fuel_type", "engine_layout",
+    "transmission_clean", "exterior_color_base", "interior_color_base",
+]
+
+num_cols = [c for c in num_cols if c in X_train.columns]
+cat_cols = [c for c in cat_cols if c in X_train.columns]
+
+print("Numeric cols:", num_cols)
+print("Categorical cols:", cat_cols)
+
+# ----------------------------
+# Step 2: Prepare train/val/test (simple, explicit)
+# - numeric: fill NaNs with train medians
+# - categorical: fill NaNs with "unknown" and cast to string
+# ----------------------------
+X_train_nn = X_train.copy()
+X_val_nn   = X_val.copy()
+X_test_nn  = X_test.copy()
+
+# Add engine missing indicators (helps NNs; optional but simple)
+for col in ["engine_liters", "engine_cylinders"]:
+    if col in X_train_nn.columns:
+        miss = f"{col}_missing"
+        X_train_nn[miss] = X_train_nn[col].isna().astype("int64")
+        X_val_nn[miss]   = X_val_nn[col].isna().astype("int64")
+        X_test_nn[miss]  = X_test_nn[col].isna().astype("int64")
+        if miss not in num_cols:
+            num_cols.append(miss)
+
+# numeric impute using TRAIN medians only
+train_medians = X_train_nn[num_cols].median(numeric_only=True)
+X_train_nn[num_cols] = X_train_nn[num_cols].fillna(train_medians)
+X_val_nn[num_cols]   = X_val_nn[num_cols].fillna(train_medians)
+X_test_nn[num_cols]  = X_test_nn[num_cols].fillna(train_medians)
+
+# categorical fill/cast
+for c in cat_cols:
+    X_train_nn[c] = X_train_nn[c].fillna("unknown").astype(str)
+    X_val_nn[c]   = X_val_nn[c].fillna("unknown").astype(str)
+    X_test_nn[c]  = X_test_nn[c].fillna("unknown").astype(str)
+
+# targets (already log1p)
+y_train_nn = y_train.to_numpy().astype("float32")
+y_val_nn   = y_val.to_numpy().astype("float32")
+y_test_nn  = y_test.to_numpy().astype("float32")
+
+print("Rows:", {"train": len(X_train_nn), "val": len(X_val_nn), "test": len(X_test_nn)})
+```
+
+#### Keras Model Preprossesing 
+```{python}
+# ----------------------------
+# Step 3: Build preprocessing layers (readable)
+# - Normalization for numeric
+# - StringLookup + Embedding per categorical feature
+# ----------------------------
+
+# ----------------------------
+# Keras: decide whether we will TRAIN (and thus need adapt/build)
+# ----------------------------
+latest_path = KERAS_LATEST_PATH if "KERAS_LATEST_PATH" in globals() else (MODEL_DIR / "keras" / "keras_model.keras")
+
+WILL_TRAIN_KERAS = (
+    (TRAIN_MODE == "smoke") or
+    (TRAIN_MODE == "full" and (RETRAIN_KERAS or (not latest_path.exists())))
+)
+
+print("Keras WILL_TRAIN_KERAS =", WILL_TRAIN_KERAS, "| latest exists =", latest_path.exists())
+
+if not WILL_TRAIN_KERAS:
+    print("⏭️ Skipping adapt/build preprocessing layers (will load existing Keras model later).")
+else:
+    # 3A) Numeric normalization
+    num_norm = layers.Normalization(name="num_norm")
+    num_norm.adapt(X_train_nn[num_cols].astype("float32").to_numpy())
+
+    # 3B) Categorical lookups + embedding sizes
+    lookups = {}
+    embed_dims = {}
+    vocab_sizes = {}
+
+    def suggest_embed_dim(vocab_size: int) -> int:
+        dim = int(np.ceil(np.log2(vocab_size + 1) * 2))
+        return int(np.clip(dim, 8, 50))
+
+    for c in cat_cols:
+        lookup = layers.StringLookup(output_mode="int", name=f"{c}_lookup")
+        lookup.adapt(X_train_nn[c].astype(str).to_numpy())
+
+        vocab_size = lookup.vocabulary_size()
+        dim = suggest_embed_dim(vocab_size)
+
+        lookups[c] = lookup
+        vocab_sizes[c] = int(vocab_size)
+        embed_dims[c] = int(dim)
+
+    print("Embedding plan:")
+    for c in cat_cols:
+        print(f"  {c:20s} vocab={vocab_sizes[c]:6d}  emb_dim={embed_dims[c]:2d}")
+```
+
+#### Keras Model Building 
+```{python}
+# ----------------------------
+# Step 4: Build the Keras model (clear architecture)
+# Activation choice:
+# - SiLU/Swish is a strong default for tabular (often smoother than ReLU)
+# - You can switch to 'relu' easily if you want
+# ----------------------------
+
+if not WILL_TRAIN_KERAS:
+    print("⏭️ Skipping model build (will load existing Keras model later).")
+else:
+    # Inputs
+    numeric_in = keras.Input(shape=(len(num_cols),), name="numeric", dtype=tf.float32)
+    cat_inputs = {c: keras.Input(shape=(1,), name=c, dtype=tf.string) for c in cat_cols}
+
+    # Numeric path
+    x_num = num_norm(numeric_in)
+
+    # Categorical paths -> lookup -> embedding -> flatten
+    emb_list = []
+    for c in cat_cols:
+        x = lookups[c](cat_inputs[c])
+        x = layers.Embedding(input_dim=vocab_sizes[c], output_dim=embed_dims[c], name=f"{c}_emb")(x)
+        x = layers.Reshape((embed_dims[c],), name=f"{c}_emb_flat")(x)
+        emb_list.append(x)
+
+    # Concatenate all
+    x = layers.Concatenate(name="concat")([x_num] + emb_list)
+
+    x = layers.Dense(256, kernel_initializer="he_normal")(x)
+    x = layers.BatchNormalization()(x)
+    x = layers.Activation(tf.keras.activations.silu)(x)
+    x = layers.Dropout(0.30)(x)
+
+    x = layers.Dense(128, kernel_initializer="he_normal")(x)
+    x = layers.BatchNormalization()(x)
+    x = layers.Activation(tf.keras.activations.silu)(x)
+    x = layers.Dropout(0.25)(x)
+
+    x = layers.Dense(64, kernel_initializer="he_normal")(x)
+    x = layers.BatchNormalization()(x)
+    x = layers.Activation(tf.keras.activations.silu)(x)
+    x = layers.Dropout(0.20)(x)
+
+    out = layers.Dense(1, name="pred_log1p")(x)
+
+    model = keras.Model(
+        inputs={"numeric": numeric_in, **cat_inputs},
+        outputs=out,
+        name="tabular_nn_embeddings"
+    )
+
+    model.compile(
+        optimizer=keras.optimizers.Adam(learning_rate=1e-3),
+        loss="mse",
+        metrics=[keras.metrics.RootMeanSquaredError(name="rmse_log")]
+    )
+
+    display(model.summary())
+
+# ----------------------------
+# Step 5: Convert pandas -> Keras-friendly input dicts
+# ----------------------------
+def to_input_dict(Xdf: pd.DataFrame):
+    d = {"numeric": Xdf[num_cols].astype("float32").to_numpy()}
+    for c in cat_cols:
+        d[c] = Xdf[c].astype(str).to_numpy()
+    return d
+
+train_inputs = to_input_dict(X_train_nn)
+val_inputs   = to_input_dict(X_val_nn)
+test_inputs  = to_input_dict(X_test_nn)
+```
+
+#### Keras Model Training 
+```{python}
+# ----------------------------
+# Step 6: Train or Load (EarlyStopping + ReduceLROnPlateau + checkpoint)
+# ----------------------------
+
+# Expect these globals already exist from your earlier setup:
+# - TRAIN_MODE in {"skip","smoke","full"}
+# - RETRAIN_KERAS: bool
+# - KERAS_DIR, KERAS_RUNS_DIR created earlier (or we create them here safely)
+# - model already built/compiled if we're going to train
+# - train_inputs, val_inputs, y_train_nn, y_val_nn exist if we're going to train
+
+# ----------------------------
+# Step 6: Train or Load
+# ----------------------------
+
+latest_path = KERAS_LATEST_PATH
+KERAS_RUNS_DIR = KERAS_RUNS_DIR
+KERAS_DIR = KERAS_DIR 
+
+history = None
+KERAS_RUN_DIR = None
+
+# 1) SKIP mode: load latest if available
+if TRAIN_MODE == "skip":
+    if latest_path.exists():
+        print("✅ TRAIN_MODE='skip' — loading latest Keras model:\n ", latest_path)
+        model = keras.models.load_model(latest_path)
+    else:
+        print("⏭️ TRAIN_MODE='skip' — no latest Keras model found, skipping.")
+        model = None
+
+# 2) FULL mode: load latest unless retraining
+elif (TRAIN_MODE == "full") and latest_path.exists() and (not RETRAIN_KERAS):
+    print("✅ Loading existing Keras latest model (RETRAIN_KERAS=False, TRAIN_MODE='full'):\n ", latest_path)
+    model = keras.models.load_model(latest_path)
+
+# 3) Otherwise TRAIN (smoke always trains; full trains if retraining or missing latest)
+else:
+    if model is None:
+        raise RuntimeError(
+            "Keras training requested, but `model` is None. "
+            "Make sure Step 4 ran (model built/compiled) before Step 6."
+        )
+
+    if TRAIN_MODE == "smoke":
+        print("🧪 Smoke mode: training a quick sanity-check run (will NOT update latest).")
+        EPOCHS = 10
+        BATCH = 1024
+    else:
+        print("🔁 Training Keras (full).")
+        EPOCHS = 50
+        BATCH = 2048
+
+    run_ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    KERAS_RUN_DIR = KERAS_RUNS_DIR / f"run_{run_ts}_{TRAIN_MODE}"
+    KERAS_RUN_DIR.mkdir(parents=True, exist_ok=True)
+
+    best_path = KERAS_RUN_DIR / "best.keras"
+    versioned_path = KERAS_RUN_DIR / "keras_model.keras"
+
+    callbacks = [
+        keras.callbacks.EarlyStopping(
+            monitor="val_loss",
+            patience=8 if TRAIN_MODE == "full" else 3,
+            restore_best_weights=True
+        ),
+        keras.callbacks.ReduceLROnPlateau(
+            monitor="val_loss",
+            factor=0.5,
+            patience=3 if TRAIN_MODE == "full" else 1,
+            min_lr=1e-6
+        ),
+        keras.callbacks.ModelCheckpoint(
+            filepath=str(best_path),
+            monitor="val_loss",
+            save_best_only=True
+        )
+    ]
+
+    # ----------------------------
+    print("TRAIN_MODE =", TRAIN_MODE, "| epochs=", EPOCHS, "| batch=", BATCH)
+    print("train rows =", len(X_train_nn), "val rows =", len(X_val_nn))
+    # ----------------------------
+
+    # ✅ ACTUAL TRAINING (now reachable)
+    history = model.fit(
+        train_inputs, y_train_nn,
+        validation_data=(val_inputs, y_val_nn),
+        epochs=EPOCHS,
+        batch_size=BATCH,
+        verbose=2,
+        callbacks=callbacks
+    )
+
+    # ----------------------------
+    print("History keys:", history.history.keys())
+    print("KERAS_RUN_DIR =", KERAS_RUN_DIR)
+    # ----------------------------
+
+    # Load best checkpoint explicitly
+    if best_path.exists():
+        model = keras.models.load_model(best_path)
+        print("✅ Loaded best checkpoint:", best_path)
+
+    # Save versioned always
+    model.save(versioned_path)
+    print("💾 Saved versioned model:", versioned_path)
+
+    # Update "latest" only for full mode
+    if TRAIN_MODE == "full":
+        model.save(latest_path)
+        print("✅ Updated latest model:", latest_path)
+    else:
+        print("🚫 Smoke run: NOT updating latest pointer.")
+
+    atomic_write_json(KERAS_RUN_DIR / "run_info.json", {
+        "train_mode": TRAIN_MODE,
+        "timestamp": run_ts,
+        "num_cols": list(num_cols),
+        "cat_cols": list(cat_cols),
+    })
+
+    atomic_write_json(KERAS_RUN_DIR / "train_medians.json", {
+        k: float(v) for k, v in train_medians.to_dict().items()
+    })
 
 ```
 
+#### Keras Evaluation 
 ```{python}
+# ----------------------------
+# Step 7: Evaluate (dollars) with FULL + CLIPPED
+# ----------------------------
 
-```
+if ("model" not in globals()) or (model is None):
+    print("⚠️ Keras model is not available — skipping evaluation.")
+else:
+    # Test
+    pred_log_test = model.predict(test_inputs, batch_size=4096).ravel()
+    pred_test = np.expm1(pred_log_test)
+    true_test = np.expm1(y_test_nn)
 
-```{python}
+    keras_test_m = show_metrics_table("Keras", true_test, pred_test)
 
+    # Train+Val
+    X_trainval_nn = pd.concat([X_train_nn, X_val_nn], axis=0)
+    y_trainval_nn = np.concatenate([y_train_nn, y_val_nn], axis=0)
+    trainval_inputs = to_input_dict(X_trainval_nn)
+
+    pred_log_trainval = model.predict(trainval_inputs, batch_size=4096, verbose=0).ravel()
+    pred_trainval = np.expm1(pred_log_trainval)
+    true_trainval = np.expm1(y_trainval_nn)
+
+    keras_trainval_m = show_metrics_table("Keras (Train+Val)", true_trainval, pred_trainval)
+
+    # Optional globals for your JSON metrics writer
+    keras_mae_test = keras_test_m["full"]["mae"]
+    keras_rmse_test = keras_test_m["full"]["rmse"]
+    keras_mae_trainval = keras_trainval_m["full"]["mae"]
+    keras_rmse_trainval = keras_trainval_m["full"]["rmse"]
+    keras_test_clipped = keras_test_m["clipped"]
+    keras_trainval_clipped = keras_trainval_m["clipped"]
+
+    print("✅ Done: Keras NN trained and evaluated.")
 ```
 
 ### Metrics Savepoint
 ```{python}
-# =========================
-# Save Metrics
-# =========================
+# -------------------------
+# Save Metrics (record-only; NO re-evaluation here)
+# -------------------------
 
 metrics = {}
 
@@ -1517,10 +2021,16 @@ metrics["_meta"] = {
         "val": int(len(X_val)) if "X_val" in globals() else None,
         "test": int(len(X_test)) if "X_test" in globals() else None,
         "total": int(len(X)) if "X" in globals() else None,
-    }
+    },
+    "clip_policy": {
+        "basis": "y_true_quantiles",
+        "q_low": 0.01,
+        "q_high": 0.99,
+        "note": "Clipped metrics computed on subsets where true price is within [q_low, q_high] quantiles; predictions are never used for clipping.",
+    },
 }
 
-# ---------- Ridge metrics ----------
+# ---------- Ridge metrics (record-only) ----------
 ridge_vars_exist = all(name in globals() for name in [
     "ridge_mae_trainval", "ridge_rmse_trainval", "ridge_mae_test", "ridge_rmse_test"
 ])
@@ -1532,10 +2042,17 @@ if ridge_vars_exist:
         "test_mae": float(ridge_mae_test),
         "test_rmse": float(ridge_rmse_test),
     }
+
+    # Optional: include clipped if you computed these earlier
+    if "ridge_test_clipped" in globals() and ridge_test_clipped is not None:
+        metrics["ridge"]["test_clipped"] = ridge_test_clipped
+    if "ridge_trainval_clipped" in globals() and ridge_trainval_clipped is not None:
+        metrics["ridge"]["trainval_clipped"] = ridge_trainval_clipped
+
 else:
     print("ℹ️ Skipping Ridge metrics write (need ridge_mae_trainval/ridge_rmse_trainval/ridge_mae_test/ridge_rmse_test).")
 
-# ---------- CatBoost metrics ----------
+# ---------- CatBoost metrics (record-only) ----------
 cb_vars_exist = all(name in globals() for name in [
     "cb_mae_trainval", "cb_rmse_trainval", "cb_mae_test", "cb_rmse_test"
 ])
@@ -1550,12 +2067,45 @@ if cb_vars_exist:
         "run_dir": str(RUN_DIR) if "RUN_DIR" in globals() else None,
     }
 
+    # Optional: include CV-best val metrics if you computed them earlier
     if all(name in globals() for name in ["mae_cv", "rmse_cv"]):
         metrics["catboost"]["val_mae_cvbest"] = float(mae_cv)
         metrics["catboost"]["val_rmse_cvbest"] = float(rmse_cv)
 
+    # Optional: include clipped if you computed these earlier
+    if "cb_test_clipped" in globals() and cb_test_clipped is not None:
+        metrics["catboost"]["test_clipped"] = cb_test_clipped
+    if "cb_trainval_clipped" in globals() and cb_trainval_clipped is not None:
+        metrics["catboost"]["trainval_clipped"] = cb_trainval_clipped
+
 else:
     print("ℹ️ Skipping CatBoost metrics write (need cb_mae_trainval/cb_rmse_trainval/cb_mae_test/cb_rmse_test).")
+
+# ---------- Keras metrics (record-only) ----------
+# Your Keras evaluation cell already sets:
+#   keras_mae_test, keras_rmse_test, keras_mae_trainval, keras_rmse_trainval
+#   keras_test_clipped, keras_trainval_clipped
+keras_vars_exist = all(name in globals() for name in [
+    "keras_mae_trainval", "keras_rmse_trainval", "keras_mae_test", "keras_rmse_test"
+])
+
+if keras_vars_exist:
+    metrics["keras"] = {
+        "trainval_mae": float(keras_mae_trainval),
+        "trainval_rmse": float(keras_rmse_trainval),
+        "test_mae": float(keras_mae_test),
+        "test_rmse": float(keras_rmse_test),
+        "run_dir": str(KERAS_RUN_DIR) if "KERAS_RUN_DIR" in globals() else None,
+    }
+
+    # Optional: include clipped metrics if present
+    if "keras_test_clipped" in globals() and keras_test_clipped is not None:
+        metrics["keras"]["test_clipped"] = keras_test_clipped
+    if "keras_trainval_clipped" in globals() and keras_trainval_clipped is not None:
+        metrics["keras"]["trainval_clipped"] = keras_trainval_clipped
+
+else:
+    print("ℹ️ Skipping Keras metrics write (need keras_mae_trainval/keras_rmse_trainval/keras_mae_test/keras_rmse_test).")
 
 # ---------- Write files ----------
 metrics_ts = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -1567,10 +2117,20 @@ print("🧾 Wrote metrics:", METRICS_PATH)
 atomic_write_json(METRICS_VERSIONED_PATH, metrics)
 print("🧾 Wrote versioned metrics:", METRICS_VERSIONED_PATH)
 
-# Run-specific metrics (only if RUN_DIR exists)
+# Run-specific metrics (CatBoost run dir)
 if "RUN_DIR" in globals() and RUN_DIR is not None:
     atomic_write_json(RUN_DIR / "metrics.json", metrics)
     print("🧾 Wrote run metrics:", RUN_DIR / "metrics.json")
+
+# Run-specific metrics (Keras run dir)
+if "KERAS_RUN_DIR" in globals() and KERAS_RUN_DIR is not None:
+    keras_only = {
+        "_meta": metrics["_meta"],
+        "keras": metrics.get("keras", None),
+    }
+    atomic_write_json(KERAS_RUN_DIR / "keras_metrics.json", keras_only)
+    print("🧾 Wrote Keras-only metrics:", KERAS_RUN_DIR / "keras_metrics.json")
+
 ```
 
 ### Model Comparison Graphs
@@ -1777,6 +2337,16 @@ else:
     # if ("keras_model" in globals()) and (keras_model is not None):
     #     y_pred_log_keras = keras_model.predict(X_test_keras).ravel()  # log1p predictions
     #     preds["Keras"] = np.expm1(y_pred_log_keras)
+
+    # ----------------------------
+    # Keras (add this block)
+    # ----------------------------
+    if ("model" in globals()) and (model is not None) and ("test_inputs" in globals()):
+        y_pred_log_keras = model.predict(test_inputs, batch_size=4096, verbose=0).ravel()  # log1p preds
+        preds["Keras"] = np.expm1(y_pred_log_keras)  # dollars
+    else:
+        print("ℹ️ Keras model/test_inputs not available — skipping Keras plots.")
+
 
     if len(preds) == 0:
         print("⚠️ No model predictions available — nothing to plot.")
