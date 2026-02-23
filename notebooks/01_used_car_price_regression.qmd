@@ -18,7 +18,56 @@ execute:
 
 ## Project Background
 
-## Project Setup
+## Data Setup Explanation
+
+This project uses the Kaggle dataset  
+**andreinovikov/used-cars-dataset**
+
+The raw dataset is expected at:
+
+    data/raw/cars.csv
+
+### Automatic download (recommended)
+
+If `data/raw/cars.csv` is not present, the notebook will automatically download and extract the dataset using the Kaggle CLI.
+
+The download helper supports current Kaggle authentication methods.
+
+### One-time setup (choose ONE option)
+
+**Option A — Kaggle API token (recommended)**
+
+1. Go to Kaggle → Account → API → Create New API Token
+2. Set the environment variable (you can place this in `~/.zshrc`):
+
+       export KAGGLE_API_TOKEN="your_token_here"
+
+**Option B — Token file**
+
+    mkdir -p ~/.kaggle
+    echo "$KAGGLE_API_TOKEN" > ~/.kaggle/access_token
+    chmod 600 ~/.kaggle/access_token
+
+**Option C — Legacy Kaggle credentials (still supported)**
+
+- `~/.kaggle/kaggle.json`, or
+- environment variables `KAGGLE_USERNAME` and `KAGGLE_KEY`
+
+### Kaggle CLI installation
+
+    pip install kaggle
+
+Once credentials are available, the notebook will download, extract, and place `cars.csv` into `data/raw/` automatically.
+
+### Manual download of csv file
+
+If you prefer not to use the Kaggle CLI, manually download the dataset from Kaggle and place:
+
+    cars.csv → data/raw/cars.csv
+
+The remainder of the pipeline will run unchanged.
+
+## Folder Structure
 
 > Note: This report automatically exports reusable pipeline code to `src/pipeline.py`. Additional modules in `src/` are placeholders for future CLI training and deployment.
 
@@ -75,11 +124,11 @@ This report runs **locally**. It uses:
 > - `scripts/` (empty)
 > - `src/`
 
+## Project Setup
 ```{python}
 # ===============================
 # Load libraries
 # ===============================
-
 from pathlib import Path
 import os, json, re
 import numpy as np
@@ -108,10 +157,14 @@ from tensorflow import keras
 from tensorflow.keras import layers
 import keras_tuner as kt
 
+import shutil
+import subprocess
+import zipfile
+
 # ===============================
 # Training control flags
 # ===============================
-TRAIN_MODE = "smoke"   # "smoke" | "full" | "skip"
+TRAIN_MODE = "full"   # "smoke" | "full" | "skip"
 
 RETRAIN_RIDGE = True
 RETRAIN_CATBOOST = True
@@ -130,7 +183,7 @@ def find_project_root(start: Path) -> Path:
     for parent in [p] + list(p.parents):
         if any((parent / m).exists() for m in markers):
             return parent
-    return p  
+    return p
 
 PROJECT_ROOT = find_project_root(Path.cwd())
 print("PROJECT_ROOT =", PROJECT_ROOT)
@@ -146,9 +199,177 @@ MODEL_DIR = PROJECT_ROOT / "models"
 for d in [RAW_DIR, PROCESSED_DIR, MODEL_DIR]:
     d.mkdir(parents=True, exist_ok=True)
 
+# ----------------------------
+# Raw/processed paths
+# ----------------------------
 RAW_CSV = RAW_DIR / "cars.csv"
 CLEAN_PARQUET = PROCESSED_DIR / "cars_cleaned.parquet"
 FEATURES_PARQUET = PROCESSED_DIR / "cars_features.parquet"
+
+# ===============================
+# Kaggle dataset download helper
+# ===============================
+
+# Kaggle dataset configuration
+KAGGLE_DATASET_SLUG = "andreinovikov/used-cars-dataset"
+RAW_EXPECTED_NAME = "cars.csv"
+
+def _kaggle_cli_present() -> bool:
+    return shutil.which("kaggle") is not None
+
+def _kaggle_creds_present() -> bool:
+    """
+    Kaggle CLI auth detection.
+
+    Supports:
+      - NEW: env var KAGGLE_API_TOKEN
+      - NEW: file ~/.kaggle/access_token
+      - LEGACY: file ~/.kaggle/kaggle.json
+      - LEGACY: env vars KAGGLE_USERNAME + KAGGLE_KEY
+    """
+    token_env = os.environ.get("KAGGLE_API_TOKEN", "").strip()
+    token_file = Path.home() / ".kaggle" / "access_token"
+    legacy_json = Path.home() / ".kaggle" / "kaggle.json"
+    legacy_user = os.environ.get("KAGGLE_USERNAME", "").strip()
+    legacy_key  = os.environ.get("KAGGLE_KEY", "").strip()
+
+    return (
+        bool(token_env)
+        or token_file.exists()
+        or legacy_json.exists()
+        or (bool(legacy_user) and bool(legacy_key))
+    )
+
+def _run(cmd: list[str]) -> None:
+    subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+
+def ensure_raw_csv(
+    raw_csv_path: Path,
+    *,
+    dataset_slug: str = KAGGLE_DATASET_SLUG,
+    expected_name: str = RAW_EXPECTED_NAME,
+    force: bool = False
+) -> None:
+    """
+    Ensures data/raw/cars.csv exists.
+    - If present (and force=False): do nothing.
+    - If missing (or force=True): downloads via Kaggle CLI into data/raw and ensures filename == expected_name.
+    """
+    raw_dir = raw_csv_path.parent
+    raw_dir.mkdir(parents=True, exist_ok=True)
+
+    if raw_csv_path.exists() and not force:
+        print(f"✅ Found raw dataset: {raw_csv_path}")
+        return
+
+    if not dataset_slug:
+        raise FileNotFoundError(
+            f"Raw dataset not found at: {raw_csv_path}\n\n"
+            "Dataset slug is not set.\n"
+            "Set KAGGLE_DATASET_SLUG = 'owner/dataset-name' or provide dataset_slug=... to ensure_raw_csv().\n\n"
+            "Manual option:\n"
+            f"  Download from Kaggle and place '{raw_csv_path.name}' into:\n"
+            f"  {raw_dir}/"
+        )
+
+    if not _kaggle_cli_present():
+        raise FileNotFoundError(
+            f"Raw dataset not found at: {raw_csv_path}\n\n"
+            "Kaggle CLI is not installed.\n"
+            "Install it in this environment with one of:\n"
+            "  uv pip install kaggle\n"
+            "  pip install kaggle\n\n"
+            "Manual option:\n"
+            f"  Download from Kaggle and place '{raw_csv_path.name}' into:\n"
+            f"  {raw_dir}/"
+        )
+
+    if not _kaggle_creds_present():
+        raise FileNotFoundError(
+            f"Raw dataset not found at: {raw_csv_path}\n\n"
+            "Kaggle credentials not detected.\n\n"
+            "Use ONE of these (one-time setup):\n"
+            "  A) NEW (recommended): set env var\n"
+            "       export KAGGLE_API_TOKEN='...'\n"
+            "     (Put it in ~/.zshrc if you want it to persist)\n"
+            "  B) NEW: create file\n"
+            "       mkdir -p ~/.kaggle\n"
+            "       printf \"%s\" \"$KAGGLE_API_TOKEN\" > ~/.kaggle/access_token\n"
+            "       chmod 600 ~/.kaggle/access_token\n"
+            "  C) LEGACY: kaggle.json\n"
+            "       ~/.kaggle/kaggle.json  (chmod 600)\n"
+            "  D) LEGACY env vars: KAGGLE_USERNAME + KAGGLE_KEY\n\n"
+            "Then re-run the notebook."
+        )
+
+    print(f"⬇️ Downloading Kaggle dataset: {dataset_slug}")
+    print(f"📁 Target folder: {raw_dir}")
+    print(f"📄 Expected CSV: {expected_name}")
+
+    # Download zip to RAW_DIR
+    cmd = [
+        "kaggle", "datasets", "download",
+        "-d", dataset_slug,
+        "-p", str(raw_dir),
+        "--force",
+    ]
+    subprocess.run(cmd, check=True)
+
+    # Find the newest zip in RAW_DIR
+    zips = sorted(raw_dir.glob("*.zip"), key=lambda p: p.stat().st_mtime, reverse=True)
+    if not zips:
+        raise RuntimeError(
+            "Kaggle download finished but no .zip was found in data/raw/.\n"
+            f"Check {raw_dir} for downloaded files."
+        )
+
+    zip_path = zips[0]
+    print(f"Extracting: {zip_path.name}")
+
+    with zipfile.ZipFile(zip_path, "r") as zf:
+        zf.extractall(raw_dir)
+
+    expected_path = raw_dir / expected_name
+    if expected_path.exists():
+        if expected_path != raw_csv_path:
+            expected_path.replace(raw_csv_path)
+        print(f"✅ Ready: {raw_csv_path}")
+        return
+
+    candidates = sorted(raw_dir.glob("*.csv"), key=lambda p: p.stat().st_mtime, reverse=True)
+    if not candidates:
+        files = sorted([p.name for p in raw_dir.glob("*") if p.is_file()])
+        raise FileNotFoundError(
+            f"Downloaded and extracted Kaggle dataset, but no CSV was found.\n\n"
+            f"Files now in {raw_dir}:\n  - " + "\n  - ".join(files)
+        )
+
+    # If there is exactly one CSV, rename it to expected_name
+    if len(candidates) == 1:
+        candidates[0].replace(raw_csv_path)
+        print(f"✅ Renamed {candidates[0].name} → {expected_name}")
+        print(f"✅ Ready: {raw_csv_path}")
+        return
+
+    # If multiple CSVs, prefer one containing "cars" in the filename
+    for c in candidates:
+        if "cars" in c.name.lower():
+            c.replace(raw_csv_path)
+            print(f"✅ Selected {c.name} → {expected_name}")
+            print(f"✅ Ready: {raw_csv_path}")
+            return
+
+    # Otherwise, fail with a helpful listing
+    raise FileNotFoundError(
+        f"Multiple CSVs found in {raw_dir}, but none named '{expected_name}'.\n"
+        f"Found: {[c.name for c in candidates]}\n\n"
+        "Fix:\n"
+        "  - Update RAW_EXPECTED_NAME to match the correct CSV inside the zip, OR\n"
+        "  - Manually rename the correct CSV to 'cars.csv' in data/raw/."
+    )
+
+# Call once to ensure csv present
+ensure_raw_csv(RAW_CSV, force=False)
 
 # ----------------------------
 # Ridge artifact paths
@@ -156,8 +377,7 @@ FEATURES_PARQUET = PROCESSED_DIR / "cars_features.parquet"
 RIDGE_DIR = MODEL_DIR / "ridge"
 RIDGE_DIR.mkdir(parents=True, exist_ok=True)
 
-RIDGE_LATEST_PATH = RIDGE_DIR / "ridge_pipeline.joblib"   
-
+RIDGE_LATEST_PATH = RIDGE_DIR / "ridge_pipeline.joblib"
 RIDGE_PATH = RIDGE_LATEST_PATH
 
 # ----------------------------
@@ -175,7 +395,7 @@ STAGE2_DONE = CATBOOST_DIR / "catboost_stage2_done.txt"
 FINAL_PARAMS_PATH = CATBOOST_DIR / "catboost_final_params.json"
 FINAL_DONE = CATBOOST_DIR / "catboost_done.txt"
 
-CATBOOST_FINAL_PATH = CATBOOST_DIR / "catboost_final.cbm"  
+CATBOOST_FINAL_PATH = CATBOOST_DIR / "catboost_final.cbm"
 FEATURE_COLS_PATH = CATBOOST_DIR / "feature_columns.json"
 
 STAGE1_INPROGRESS = CATBOOST_DIR / "catboost_stage1_in_progress.txt"
@@ -188,8 +408,8 @@ FINAL_INPROGRESS  = CATBOOST_DIR / "catboost_in_progress.txt"
 KERAS_DIR = MODEL_DIR / "keras"
 KERAS_DIR.mkdir(parents=True, exist_ok=True)
 
-KERAS_LATEST_PATH = KERAS_DIR / "keras_model.keras"     
-KERAS_RUNS_DIR = KERAS_DIR 
+KERAS_LATEST_PATH = KERAS_DIR / "keras_model.keras"
+KERAS_RUNS_DIR = KERAS_DIR
 KERAS_RUNS_DIR.mkdir(parents=True, exist_ok=True)
 
 # ----------------------------
@@ -199,7 +419,6 @@ METRICS_DIR = MODEL_DIR / "metrics"
 METRICS_DIR.mkdir(parents=True, exist_ok=True)
 
 METRICS_LATEST_PATH = METRICS_DIR / "metrics_latest.json"
-
 METRICS_PATH = METRICS_LATEST_PATH
 
 PROJECT_ROOT, RAW_CSV

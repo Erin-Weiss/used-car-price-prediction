@@ -1,20 +1,40 @@
+# ===============================
+# Core numerical / data stack
+# ===============================
 numpy
 pandas
-scikit-learn
 scipy
+pyarrow
+
+# ===============================
+# Visualization
+# ===============================
 matplotlib
 seaborn
 plotly
-pyarrow
+
+# ===============================
+# Machine learning
+# ===============================
+scikit-learn
 catboost
 joblib
+
+# ===============================
+# Deep learning
+# ===============================
 tensorflow>=2.15,<2.17
 keras-tuner
 
+# ===============================
+# Data acquisition (Kaggle)
+# ===============================
 kaggle
 kagglehub
 
-# Quarto execution
+# ===============================
+# Quarto / notebook execution
+# ===============================
 jupyter
 ipykernel
 nbformat
