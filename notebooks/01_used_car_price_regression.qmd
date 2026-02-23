@@ -6,8 +6,8 @@ freeze: auto
 format:
   html:
     toc: true
-    toc-depth: 3
-    code-fold: true
+    toc-depth: 4
+    code-fold: false
     code-tools: true
     theme: cosmo
 execute:
@@ -15,6 +15,8 @@ execute:
   warning: false
   message: false
 ---
+
+## Project Background
 
 ## Project Setup
 
@@ -26,12 +28,52 @@ This report runs **locally**. It uses:
 -   **Kaggle CLI** to download the dataset once
 -   **Checkpoint saves** after each stage (cleaned data, engineered features, trained models)
 
-> Folder structure assumed:
+> **Folder structure assumed:**
 >
-> -   `data/raw/`
-> -   `data/processed/`
-> -   `models/`
-> -   `reports/`
+> - `data/`
+>   - `raw/` (created)
+>     - `cars.csv` (raw dataset)
+>   - `processed/` (created)
+>     - `cars_cleaned.parquet` (written)
+>     - `cars_features.parquet` (written)
+>     - `splits_indices_v1.json` (written; shared train/val/test indices)
+>
+> - `models/` (created)
+>   - `metrics/` (created)
+>     - `metrics_latest.json` (written)
+>     - `metrics_{timestamp}.json` (written)
+>
+>   - `ridge/` (created)
+>     - `ridge_pipeline.joblib` (latest pointer; written only on `TRAIN_MODE="full"`)
+>     - `run_{timestamp}_{train_mode}/` (created)
+>       - `ridge_pipeline.joblib` (versioned)
+>       - `run_info.json` (written)
+>       - `ridge_metrics.json` (written)
+>
+>   - `catboost/` (created)
+>     - `catboost_final.cbm` (latest pointer; written only on `TRAIN_MODE="full"`)
+>     - `run_{timestamp}_{train_mode}/` (created)
+>       - `catboost_final.cbm` (versioned)
+>       - `run_info.json` (written)
+>       - `final_params.json` (written)
+>       - `feature_columns.json` (written)
+>       - `metrics.json` (written)
+>
+>   - `keras/` (created)
+>     - `keras_model.keras` (latest pointer; written only on `TRAIN_MODE="full"`)
+>     - `run_{timestamp}_{train_mode}/` (created)
+>       - `keras_model.keras` (versioned)
+>       - `run_info.json` (written)
+>       - `best_hp.json` (written)
+>       - `keras_metrics.json` (written)
+>       - `tuning/` (created)
+>         - `hyperband/`
+>         - `bayes/`
+>
+> - `notebooks/`
+> - `reports/` (empty)
+> - `scripts/` (empty)
+> - `src/`
 
 ```{python}
 # ===============================
@@ -43,6 +85,8 @@ import os, json, re
 import numpy as np
 import pandas as pd
 from datetime import datetime
+import gc
+import sys
 
 import matplotlib.pyplot as plt
 import seaborn as sns
@@ -62,26 +106,26 @@ import joblib
 import tensorflow as tf
 from tensorflow import keras
 from tensorflow.keras import layers
+import keras_tuner as kt
+
 # ===============================
 # Training control flags
 # ===============================
 TRAIN_MODE = "smoke"   # "smoke" | "full" | "skip"
 
-RETRAIN_RIDGE = False
-RETRAIN_CATBOOST = False
+RETRAIN_RIDGE = True
+RETRAIN_CATBOOST = True
 RETRAIN_KERAS = True
 
 # ===============================
 # Paths section
 # ===============================
-
-# --- Portable project paths ---
 def find_project_root(start: Path) -> Path:
     """
-    Walk upward until we find a project marker.
-    Choose markers that exist in your repo.
+    Walk upward until it finds a project marker.
+    Choose markers that exist in repo.
     """
-    markers = ["pyproject.toml", ".git", "README.md"]
+    markers = [".git", "README.md"]
     p = start.resolve()
     for parent in [p] + list(p.parents):
         if any((parent / m).exists() for m in markers):
@@ -91,6 +135,9 @@ def find_project_root(start: Path) -> Path:
 PROJECT_ROOT = find_project_root(Path.cwd())
 print("PROJECT_ROOT =", PROJECT_ROOT)
 
+# ----------------------------
+# Create project folders
+# ----------------------------
 DATA_DIR = PROJECT_ROOT / "data"
 RAW_DIR = DATA_DIR / "raw"
 PROCESSED_DIR = DATA_DIR / "processed"
@@ -103,6 +150,63 @@ RAW_CSV = RAW_DIR / "cars.csv"
 CLEAN_PARQUET = PROCESSED_DIR / "cars_cleaned.parquet"
 FEATURES_PARQUET = PROCESSED_DIR / "cars_features.parquet"
 
+# ----------------------------
+# Ridge artifact paths
+# ----------------------------
+RIDGE_DIR = MODEL_DIR / "ridge"
+RIDGE_DIR.mkdir(parents=True, exist_ok=True)
+
+RIDGE_LATEST_PATH = RIDGE_DIR / "ridge_pipeline.joblib"   
+
+RIDGE_PATH = RIDGE_LATEST_PATH
+
+# ----------------------------
+# CatBoost artifact paths
+# ----------------------------
+CATBOOST_DIR = MODEL_DIR / "catboost"
+CATBOOST_DIR.mkdir(parents=True, exist_ok=True)
+
+STAGE1_PARAMS_PATH = CATBOOST_DIR / "catboost_stage1_best_params.json"
+STAGE1_DONE = CATBOOST_DIR / "catboost_stage1_done.txt"
+
+STAGE2_PARAMS_PATH = CATBOOST_DIR / "catboost_stage2_best_params.json"
+STAGE2_DONE = CATBOOST_DIR / "catboost_stage2_done.txt"
+
+FINAL_PARAMS_PATH = CATBOOST_DIR / "catboost_final_params.json"
+FINAL_DONE = CATBOOST_DIR / "catboost_done.txt"
+
+CATBOOST_FINAL_PATH = CATBOOST_DIR / "catboost_final.cbm"  
+FEATURE_COLS_PATH = CATBOOST_DIR / "feature_columns.json"
+
+STAGE1_INPROGRESS = CATBOOST_DIR / "catboost_stage1_in_progress.txt"
+STAGE2_INPROGRESS = CATBOOST_DIR / "catboost_stage2_in_progress.txt"
+FINAL_INPROGRESS  = CATBOOST_DIR / "catboost_in_progress.txt"
+
+# ----------------------------
+# Keras artifact paths
+# ----------------------------
+KERAS_DIR = MODEL_DIR / "keras"
+KERAS_DIR.mkdir(parents=True, exist_ok=True)
+
+KERAS_LATEST_PATH = KERAS_DIR / "keras_model.keras"     
+KERAS_RUNS_DIR = KERAS_DIR 
+KERAS_RUNS_DIR.mkdir(parents=True, exist_ok=True)
+
+# ----------------------------
+# Metrics artifact paths
+# ----------------------------
+METRICS_DIR = MODEL_DIR / "metrics"
+METRICS_DIR.mkdir(parents=True, exist_ok=True)
+
+METRICS_LATEST_PATH = METRICS_DIR / "metrics_latest.json"
+
+METRICS_PATH = METRICS_LATEST_PATH
+
+PROJECT_ROOT, RAW_CSV
+
+# ===============================
+# Load or clean dataframes
+# ===============================
 def load_or_build(path: Path, build_fn, *, label: str):
     """
     If `path` exists, load it. Otherwise run build_fn() and save.
@@ -119,37 +223,8 @@ def load_or_build(path: Path, build_fn, *, label: str):
     return df_out
 
 # ===============================
-# Ridge artifact paths
+# Functions for model saving
 # ===============================
-RIDGE_DIR = MODEL_DIR / "ridge"
-RIDGE_DIR.mkdir(parents=True, exist_ok=True)
-
-RIDGE_LATEST_PATH = RIDGE_DIR / "ridge_pipeline.joblib"   
-
-RIDGE_PATH = RIDGE_LATEST_PATH
-
-# ===============================
-# CatBoost artifact paths
-# ===============================
-CATBOOST_DIR = MODEL_DIR / "catboost"
-CATBOOST_DIR.mkdir(parents=True, exist_ok=True)
-
-STAGE1_PARAMS_PATH = CATBOOST_DIR / "catboost_stage1_best_params.json"
-STAGE1_DONE = CATBOOST_DIR / "catboost_stage1_done.txt"
-
-STAGE2_PARAMS_PATH = CATBOOST_DIR / "catboost_stage2_best_params.json"
-STAGE2_DONE = CATBOOST_DIR / "catboost_stage2_done.txt"
-
-FINAL_PARAMS_PATH = CATBOOST_DIR / "catboost_final_params.json"
-FINAL_DONE = CATBOOST_DIR / "catboost_done.txt"
-
-CATBOOST_FINAL_PATH = CATBOOST_DIR / "catboost_final.cbm"  # "latest"
-FEATURE_COLS_PATH = CATBOOST_DIR / "feature_columns.json"
-
-STAGE1_INPROGRESS = CATBOOST_DIR / "catboost_stage1_in_progress.txt"
-STAGE2_INPROGRESS = CATBOOST_DIR / "catboost_stage2_in_progress.txt"
-FINAL_INPROGRESS  = CATBOOST_DIR / "catboost_in_progress.txt"
-
 def run_dir_name(run_ts: str, train_mode: str) -> str:
     return f"run_{run_ts}_{train_mode}"
 
@@ -174,39 +249,15 @@ def mark_in_progress(path: Path, text: str = "in_progress"):
 def clear_file(path: Path):
     if path.exists():
         path.unlink()
-
-# ----------------------------
-# Keras artifact paths
-# ----------------------------
-KERAS_DIR = MODEL_DIR / "keras"
-KERAS_DIR.mkdir(parents=True, exist_ok=True)
-
-KERAS_LATEST_PATH = KERAS_DIR / "keras_model.keras"      # "latest" pointer
-KERAS_RUNS_DIR = KERAS_DIR 
-KERAS_RUNS_DIR.mkdir(parents=True, exist_ok=True)
-
-# ===============================
-# Metrics artifact paths
-# ===============================
-METRICS_DIR = MODEL_DIR / "metrics"
-METRICS_DIR.mkdir(parents=True, exist_ok=True)
-
-METRICS_LATEST_PATH = METRICS_DIR / "metrics_latest.json"
-
-METRICS_PATH = METRICS_LATEST_PATH
-
-PROJECT_ROOT, RAW_CSV
 ```
 
 ```{python}
 # Make project root importable (so src/ can be imported if/when you want)
-import sys
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.append(str(PROJECT_ROOT))
 ```
 
 ## Export reusable code to src (only feature engineering and dataset cleaning for now)
-
 ```{python}
 # Write the cleaning + feature engineering logic into src/pipeline.py
 # NOTE: This does not change notebook execution logic; it just keeps a reusable copy in src/.
@@ -794,7 +845,7 @@ def make_or_load_splits(X, y, path=SPLITS_PATH, seed=SPLIT_SEED, test_size=0.2, 
     Creates:
       - test split: test_size (e.g. 0.2)
       - then splits remaining into train/val with val_size fraction of the remaining
-    Persists indices so Ridge/CatBoost always use exact same rows.
+    Persists indices so Ridge/CatBoost/Keras always use exact same rows.
     """
     if path.exists():
         split_idx = json.loads(path.read_text())
@@ -840,14 +891,29 @@ print("Rows:", {"train": len(X_train), "val": len(X_val), "test": len(X_test)})
 
 ## Model Section
 ```{python}
-def load_model_or_warn(path, loader, name):
-    if path.exists():
-        print(f"Loading {name} from:\n  {path}")
-        return loader(path)
-    print(f"⚠️ {name} checkpoint not found — train it to proceed.")
-    return None
+# ===============================
+# Feature schema (shared across models)
+# ===============================
+
+NUMERIC_FEATURES = [
+    "mileage", "mpg_avg", "price_drop", "seller_rating", "driver_rating",
+    "driver_reviews_num", "accidents_or_damage", "one_owner", "personal_use_only",
+    "age", "mileage_per_year", "engine_liters", "engine_cylinders",
+    "engine_turbo", "engine_hybrid", "transmission_gears", "transmission_gears_missing",
+    "is_luxury_brand", "luxury_age_interaction",
+]
+
+CATEGORICAL_FEATURES = [
+    "manufacturer", "model", "drivetrain", "fuel_type", "engine_layout",
+    "transmission_clean", "exterior_color_base", "interior_color_base",
+]
+
+# Filter to columns that actually exist as safety check
+num_cols = [c for c in NUMERIC_FEATURES if c in X_train.columns]
+cat_cols = [c for c in CATEGORICAL_FEATURES if c in X_train.columns]
 ```
 
+### Evaluation Functions
 ```{python}
 def rmse(y_true, y_pred) -> float:
     return float(np.sqrt(mean_squared_error(y_true, y_pred)))
@@ -865,7 +931,7 @@ def regression_metrics(y_true, y_pred) -> dict:
 def clipped_mask_by_y_true(y_true, q_low=0.01, q_high=0.99):
     """
     Mask rows where y_true is within [q_low, q_high] quantiles.
-    Clipping is based ONLY on y_true (never on predictions).
+    Clipping is based ONLY on y_true.
     """
     y_true = np.asarray(y_true)
     lo, hi = np.quantile(y_true, [q_low, q_high])
@@ -894,7 +960,7 @@ def metrics_full_and_clipped(y_true, y_pred, q_low=0.01, q_high=0.99) -> dict:
 
 def metrics_to_df(metrics_dict, model_name: str) -> pd.DataFrame:
     """
-    Convert output from metrics_full_and_clipped into a pretty DataFrame.
+    Convert output from metrics_full_and_clipped into a DataFrame.
     """
     rows = []
     for view in ["full", "clipped"]:
@@ -915,15 +981,6 @@ def metrics_to_df(metrics_dict, model_name: str) -> pd.DataFrame:
         })
     df = pd.DataFrame(rows).set_index(["model", "view"])
     return df
-
-def show_metrics_table(name, y_true_dollars, y_pred_dollars):
-    m = metrics_full_and_clipped(y_true_dollars, y_pred_dollars, 0.01, 0.99)
-    df = pd.DataFrame([
-        {"model": name, "view": "full", **m["full"]},
-        {"model": name, "view": "clipped", **m["clipped"]},
-    ]).set_index(["model", "view"])
-    display(df)
-    return m
 ```
 
 ### Ridge Regression (Pipeline + Grid Search)
@@ -946,22 +1003,6 @@ else:
         print("🔁 RETRAIN_RIDGE=True — retraining Ridge while keeping old model")
     else:
         print("🔁 Training Ridge (no existing model found)")
-
-    num_cols = [
-        "mileage", "mpg_avg", "price_drop", "seller_rating", "driver_rating",
-        "driver_reviews_num", "accidents_or_damage", "one_owner", "personal_use_only",
-        "age", "mileage_per_year", "engine_liters", "engine_cylinders",
-        "engine_turbo", "engine_hybrid", "transmission_gears", "transmission_gears_missing",
-        "is_luxury_brand",
-    ]
-
-    cat_cols = [
-        "manufacturer", "model", "drivetrain", "fuel_type", "engine_layout",
-        "transmission_clean", "exterior_color_base", "interior_color_base",
-    ]
-
-    num_cols = [c for c in num_cols if c in X_train.columns]
-    cat_cols = [c for c in cat_cols if c in X_train.columns]
 
     numeric_pipe = Pipeline(steps=[
         ("imputer", SimpleImputer(strategy="median")),
@@ -1008,59 +1049,77 @@ else:
     y_trainval = pd.concat([y_train, y_val], axis=0)
     best_ridge.fit(X_trainval, y_trainval)
 
-    # Save with timestamp to avoid overwriting
-    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    ridge_save_path = RIDGE_DIR / f"ridge_pipeline_{ts}.joblib"
+    # ----------------------------
+    # Save Ridge artifacts to a run folder
+    # ----------------------------
+    run_ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    RIDGE_RUN_DIR = RIDGE_DIR / run_dir_name(run_ts, TRAIN_MODE)
+    RIDGE_RUN_DIR.mkdir(parents=True, exist_ok=True)
 
-    joblib.dump(best_ridge, ridge_save_path)
-    joblib.dump(best_ridge, RIDGE_PATH)
+    versioned_path = RIDGE_RUN_DIR / "ridge_pipeline.joblib"
 
-    print("💾 Saved Ridge models:")
-    print("  - Latest:", RIDGE_PATH)
-    print("  - Versioned:", ridge_save_path)
+    # Save the trained pipeline
+    joblib.dump(best_ridge, versioned_path)
+
+    ridge_run_info = {
+        "run_ts": run_ts,
+        "train_mode": TRAIN_MODE,
+        "retrain_ridge": bool(RETRAIN_RIDGE),
+        "best_params": gs.best_params_ if "gs" in locals() else None,
+        "best_cv_rmse_log": float(-gs.best_score_) if "gs" in locals() else None,
+        "num_cols": list(num_cols),
+        "cat_cols": list(cat_cols),
+    }
+    atomic_write_json(RIDGE_RUN_DIR / "run_info.json", ridge_run_info)
+
+    # Update "latest" ONLY for full mode 
+    if TRAIN_MODE == "full":
+        joblib.dump(best_ridge, RIDGE_LATEST_PATH)
+        print("✅ Updated latest Ridge:", RIDGE_LATEST_PATH)
+    else:
+        print("🚫 Smoke run: NOT updating latest Ridge pointer.")
+
+    print("💾 Saved Ridge model:")
+    print("  - Versioned:", versioned_path)
+    print("  - Run folder:", RIDGE_RUN_DIR)
 ```
 
 #### Ridge Evaluation
 ```{python}
 # ==========================================================
-# RIDGE EVALUATION
+# RIDGE EVALUATION  (+ write run metrics.json)
 # ==========================================================
 
-if "TRAIN_MODE" in globals() and TRAIN_MODE == "skip":
-    print("⏭️ TRAIN_MODE='skip' — skipping Ridge evaluation block.")
-elif best_ridge is None:
+# 0) Resolve paths
+RIDGE_LATEST = RIDGE_LATEST_PATH if "RIDGE_LATEST_PATH" in globals() else RIDGE_PATH
+
+# 1) If we're in skip mode, try to load "latest" Ridge if needed
+if ("TRAIN_MODE" in globals()) and (TRAIN_MODE == "skip"):
+    if best_ridge is None:
+        if RIDGE_LATEST.exists():
+            print("✅ TRAIN_MODE='skip' — loading latest Ridge model for evaluation:\n ", RIDGE_LATEST)
+            best_ridge = joblib.load(RIDGE_LATEST)
+        else:
+            print("⏭️ TRAIN_MODE='skip' — no saved Ridge model found; skipping Ridge evaluation.")
+            best_ridge = None
+
+# 2) If we still don't have a model, we can't evaluate
+if best_ridge is None:
     print("⚠️ Ridge model is not available — cannot evaluate.")
 else:
-    num_cols = [
-        "mileage", "mpg_avg", "price_drop", "seller_rating", "driver_rating",
-        "driver_reviews_num", "accidents_or_damage", "one_owner", "personal_use_only",
-        "age", "mileage_per_year", "engine_liters", "engine_cylinders",
-        "engine_turbo", "engine_hybrid", "transmission_gears", "transmission_gears_missing",
-        "is_luxury_brand",
-    ]
-    cat_cols = [
-        "manufacturer", "model", "drivetrain", "fuel_type", "engine_layout",
-        "transmission_clean", "exterior_color_base", "interior_color_base",
-    ]
-
-    num_cols = [c for c in num_cols if c in X_train.columns]
-    cat_cols = [c for c in cat_cols if c in X_train.columns]
-
+    # ----------------------------
+    # TEST metrics
+    # ----------------------------
     ridge_pred_log_test = best_ridge.predict(X_test)
     ridge_pred_test = np.expm1(ridge_pred_log_test)
     ridge_true_test = np.expm1(y_test)
 
-    # Do I/Can I remove this part?
-    ridge_mae_test = mean_absolute_error(ridge_true_test, ridge_pred_test)
-    ridge_rmse_test = np.sqrt(mean_squared_error(ridge_true_test, ridge_pred_test))
-
-    print(f"RIDGE TEST MAE ($):  {ridge_mae_test:,.0f}")
-    print(f"RIDGE TEST RMSE ($): {ridge_rmse_test:,.0f}")
-
-    # New Part
     ridge_m = metrics_full_and_clipped(ridge_true_test, ridge_pred_test, q_low=0.01, q_high=0.99)
-    display(metrics_to_df(ridge_m, "Ridge"))
+    print(f"RIDGE TEST RMSE ($): {ridge_m['full']['rmse']:,.0f}")
 
+    display(metrics_to_df(ridge_m, "Ridge (Test)"))
+
+    # Feature count
     try:
         prep = best_ridge.named_steps["prep"]
         ohe = prep.named_transformers_["cat"].named_steps["ohe"]
@@ -1070,10 +1129,16 @@ else:
     except Exception as e:
         print("⚠️ Could not compute one-hot feature count:", e)
 
-    # Base plots (unclipped)
+    # ----------------------------
+    # Plots (TEST, unclipped)
+    # ----------------------------
     plt.figure(figsize=(6, 6))
     plt.scatter(ridge_true_test, ridge_pred_test, alpha=0.2)
-    plt.plot([ridge_true_test.min(), ridge_true_test.max()], [ridge_true_test.min(), ridge_true_test.max()], "r--")
+    plt.plot(
+        [ridge_true_test.min(), ridge_true_test.max()],
+        [ridge_true_test.min(), ridge_true_test.max()],
+        "r--"
+    )
     plt.xlabel("Actual Price ($)")
     plt.ylabel("Predicted Price ($)")
     plt.title("Predicted vs Actual Price (Ridge, Test Set)")
@@ -1091,31 +1156,18 @@ else:
     plt.tight_layout()
     plt.show()
 
-    # Train+Val metrics
+    # ----------------------------
+    # TRAIN+VAL metrics
+    # ----------------------------
     X_trainval = pd.concat([X_train, X_val], axis=0)
     y_trainval = pd.concat([y_train, y_val], axis=0)
 
-    ridge_pred_trainval = np.expm1(best_ridge.predict(X_trainval))
-    ridge_true_trainval = np.expm1(y_trainval)
-
-    # Do I replace this? 
-    ridge_mae_trainval = mean_absolute_error(ridge_true_trainval, ridge_pred_trainval)
-    ridge_rmse_trainval = np.sqrt(mean_squared_error(ridge_true_trainval, ridge_pred_trainval))
-
-    results_ridge = pd.DataFrame(
-        {"MAE ($)": [ridge_mae_trainval, ridge_mae_test],
-         "RMSE ($)": [ridge_rmse_trainval, ridge_rmse_test]},
-        index=["Train+Val", "Test"]
-    )
-    display(results_ridge)
-
-    # New Part 
-    ridge_pred_trainval = np.expm1(best_ridge.predict(X_trainval))
+    ridge_pred_trainval_log = best_ridge.predict(X_trainval)
+    ridge_pred_trainval = np.expm1(ridge_pred_trainval_log)
     ridge_true_trainval = np.expm1(y_trainval)
 
     ridge_tv = metrics_full_and_clipped(ridge_true_trainval, ridge_pred_trainval, q_low=0.01, q_high=0.99)
     display(metrics_to_df(ridge_tv, "Ridge (Train+Val)"))
-
 
     # Largest abs residuals on Train+Val
     ridge_residuals_trainval = ridge_true_trainval - ridge_pred_trainval
@@ -1123,29 +1175,88 @@ else:
         pd.DataFrame({
             "actual": ridge_true_trainval,
             "predicted": ridge_pred_trainval,
-            "abs_error": np.abs(ridge_residuals_trainval)
+            "abs_error": np.abs(ridge_residuals_trainval),
         })
         .sort_values("abs_error", ascending=False)
         .head(10)
     )
     display(ridge_outliers_trainval)
+
+    # Globals for metrics writer (clipped + full)
+    ridge_test_full = ridge_m["full"]
+    ridge_test_clipped = ridge_m["clipped"]
+    ridge_trainval_full = ridge_tv["full"]
+    ridge_trainval_clipped = ridge_tv["clipped"]
+
+    # ----------------------------------------------------------
+    # 3) Write Ridge metrics into the current run folder (if any)
+    # ----------------------------------------------------------
+    if ("RIDGE_RUN_DIR" in globals()) and (globals().get("RIDGE_RUN_DIR", None) is not None):
+        ridge_metrics_payload = {
+            "_meta": {
+                "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "train_mode": TRAIN_MODE if "TRAIN_MODE" in globals() else None,
+                "latest_pointer": str(RIDGE_LATEST),
+                "run_dir": str(RIDGE_RUN_DIR),
+                "split_policy": "shared_indices_v1_json" if "SPLITS_PATH" in globals() else None,
+                "clip_policy": {
+                    "basis": "y_true_quantiles",
+                    "q_low": 0.01,
+                    "q_high": 0.99,
+                },
+            },
+            "ridge": {
+                "trainval": {"full": ridge_trainval_full, "clipped": ridge_trainval_clipped},
+                "test": {"full": ridge_test_full, "clipped": ridge_test_clipped},
+            },
+        }
+
+        atomic_write_json(RIDGE_RUN_DIR / "ridge_metrics.json", ridge_metrics_payload)
+        print("🧾 Wrote Ridge run metrics:", RIDGE_RUN_DIR / "ridge_metrics.json")
+    else:
+        print("ℹ️ No RIDGE_RUN_DIR found — not writing Ridge run metrics file.")
 ```
 
 ### CatBoost (Grid Search → Early Stopping Refit)
 
 #### Catboost Setup Functions
 ```{python}
-def print_catboost_status():
-    def status(done, prog):
-        if done.exists(): return "✅ done"
-        if prog.exists(): return "🟡 in progress"
-        return "—"
-    print("CatBoost checkpoint status:")
-    print("  Stage 1:", status(STAGE1_DONE, STAGE1_INPROGRESS))
-    print("  Stage 2:", status(STAGE2_DONE, STAGE2_INPROGRESS))
-    print("  Final:  ", status(FINAL_DONE, FINAL_INPROGRESS))
+def _status_label(done: Path, prog: Path) -> str:
+    if done.exists(): return "✅ done"
+    if prog.exists(): return "🟡 in progress"
+    return "—"
 
-print_catboost_status()
+def print_catboost_status_global_and_latest_run(catboost_dir: Path):
+    # ---- Global ----
+    print("CatBoost checkpoint status (GLOBAL):")
+    print("  Stage 1:", _status_label(STAGE1_DONE, STAGE1_INPROGRESS))
+    print("  Stage 2:", _status_label(STAGE2_DONE, STAGE2_INPROGRESS))
+    print("  Final:  ", _status_label(FINAL_DONE, FINAL_INPROGRESS))
+
+    # ---- Latest run folder ----
+    run_dirs = [p for p in catboost_dir.glob("run_*") if p.is_dir()]
+    if not run_dirs:
+        print("CatBoost checkpoint status (LATEST RUN):")
+        print("  (no run_* folders found)")
+        return
+
+    latest = max(run_dirs, key=lambda p: p.stat().st_mtime)
+    print(f"CatBoost checkpoint status (LATEST RUN): {latest.name}")
+
+    s1_done = latest / "stage1_done.txt"
+    s1_prog = latest / "stage1_in_progress.txt"
+    s2_done = latest / "stage2_done.txt"
+    s2_prog = latest / "stage2_in_progress.txt"
+    f_done  = latest / "catboost_done.txt"
+    f_prog  = latest / "final_in_progress.txt"
+
+    print("  Stage 1:", _status_label(s1_done, s1_prog))
+    print("  Stage 2:", _status_label(s2_done, s2_prog))
+    print("  Final:  ", _status_label(f_done, f_prog))
+
+    # Point out whether model file exists in that run
+    model_path = latest / "catboost_final.cbm"
+    print("  Model file:", "✅ present" if model_path.exists() else "— missing")
 ```
 
 ```{python}
@@ -1160,13 +1271,8 @@ def get_catboost_training_data(X, y, *, mode="full"):
 
     It adjusts smoke/full behavior and returns grids + settings.
     """
-    global X_train, X_val, X_test, y_train, y_val, y_test
 
-    cat_cols_cb = [
-        "manufacturer", "model", "drivetrain", "fuel_type", "engine_layout",
-        "transmission_clean", "exterior_color_base", "interior_color_base",
-    ]
-    cat_cols_cb = [c for c in cat_cols_cb if c in X_train.columns]
+    cat_cols_cb = [c for c in cat_cols if c in X_train.columns]
 
     if mode == "smoke":
         # small subset for quick validation
@@ -1256,9 +1362,12 @@ def _stage_paths(run_dir: Path, stage: str):
 
 #### Catboost Training
 ```{python}
-# ---------------------------
+
+print_catboost_status_global_and_latest_run(CATBOOST_DIR)
+
+# ==========================================================
 # CatBoost training / loading
-# ---------------------------
+# ==========================================================
 
 final_cb = None
 RUN_DIR = None 
@@ -1277,7 +1386,7 @@ if TRAIN_MODE == "skip":
 
 else:
     # --------------------------------------------
-    # Full mode can load existing latest (optional)
+    # Full mode can load existing latest
     # --------------------------------------------
     if (TRAIN_MODE == "full") and CATBOOST_FINAL_PATH.exists() and (not RETRAIN_CATBOOST):
         print("✅ Loading existing CatBoost final model (RETRAIN_CATBOOST=False, TRAIN_MODE='full'):")
@@ -1294,7 +1403,7 @@ else:
         else:
             print("Training CatBoost (no final checkpoint found).")
 
-        # Prepare data + mode-specific settings (uses get_catboost_training_data)
+        # Prepare data + mode-specific settings
         (X_train_cb, X_val_cb, X_test_cb,
          y_train_cb, y_val_cb, y_test_cb,
          cat_cols_cb, param_grid_1, param_grid_2,
@@ -1504,6 +1613,7 @@ else:
             )
 
             assert final_cb.is_fitted(), "CatBoost model not fitted; refusing to save."
+            
             print("Best iteration:", final_cb.get_best_iteration())
 
             # Save feature columns
@@ -1512,8 +1622,8 @@ else:
                 atomic_write_json(FEATURE_COLS_PATH, list(X_train_cb.columns))
 
             # Save params
-            atomic_write_json(sf["params"], final_params)            # run-scoped
-            atomic_write_json(RUN_DIR / "final_params.json", final_params)  # same, explicit
+            atomic_write_json(sf["params"], final_params)           
+            atomic_write_json(RUN_DIR / "final_params.json", final_params)  
             if TOUCH_GLOBAL:
                 atomic_write_json(FINAL_PARAMS_PATH, final_params)
 
@@ -1553,89 +1663,70 @@ if final_cb is None:
     print("⚠️ CatBoost model not available — skipping evaluation.")
 else:
     # ----------------------------
-    # NEW: TRAIN split metrics
+    # TRAIN split metrics
     # ----------------------------
-    cb_pred_log_train = final_cb.predict(X_train)
-    cb_pred_train = np.expm1(cb_pred_log_train)
+    cb_pred_train = np.expm1(final_cb.predict(X_train))
     cb_true_train = np.expm1(y_train)
-
-    cb_mae_train = mean_absolute_error(cb_true_train, cb_pred_train)
-    cb_rmse_train = np.sqrt(mean_squared_error(cb_true_train, cb_pred_train))
-
-    print(f"CATBOOST TRAIN MAE ($):  {cb_mae_train:,.0f}")
-    print(f"CATBOOST TRAIN RMSE ($): {cb_rmse_train:,.0f}")
 
     cb_tr = metrics_full_and_clipped(cb_true_train, cb_pred_train, q_low=0.01, q_high=0.99)
     display(metrics_to_df(cb_tr, "CatBoost (Train)"))
 
     # ----------------------------
-    # NEW: VAL split metrics (early-stopping set)
+    # VAL split metrics (early-stopping set)
     # ----------------------------
-    cb_pred_log_val = final_cb.predict(X_val)
-    cb_pred_val = np.expm1(cb_pred_log_val)
+    cb_pred_val = np.expm1(final_cb.predict(X_val))
     cb_true_val = np.expm1(y_val)
-
-    cb_mae_val = mean_absolute_error(cb_true_val, cb_pred_val)
-    cb_rmse_val = np.sqrt(mean_squared_error(cb_true_val, cb_pred_val))
-
-    print(f"CATBOOST VAL MAE ($):  {cb_mae_val:,.0f}")
-    print(f"CATBOOST VAL RMSE ($): {cb_rmse_val:,.0f}")
 
     cb_v = metrics_full_and_clipped(cb_true_val, cb_pred_val, q_low=0.01, q_high=0.99)
     display(metrics_to_df(cb_v, "CatBoost (Val)"))
 
     # ----------------------------
-    # EXISTING: TEST split metrics
+    # TEST split metrics
     # ----------------------------
-    # Predict
-    cb_pred_log_test = final_cb.predict(X_test)
-    cb_pred_test = np.expm1(cb_pred_log_test)
+    cb_pred_test = np.expm1(final_cb.predict(X_test))
     cb_true_test = np.expm1(y_test)
 
-    # Old part
-    cb_mae_test = mean_absolute_error(cb_true_test, cb_pred_test)
-    cb_rmse_test = np.sqrt(mean_squared_error(cb_true_test, cb_pred_test))
-
-    print(f"CATBOOST TEST MAE ($):  {cb_mae_test:,.0f}")
-    print(f"CATBOOST TEST RMSE ($): {cb_rmse_test:,.0f}")
     print("Best iteration:", final_cb.get_best_iteration())
 
-    # New Part
     cb_m = metrics_full_and_clipped(cb_true_test, cb_pred_test, q_low=0.01, q_high=0.99)
-    display(metrics_to_df(cb_m, "CatBoost"))
+    print(f"CATBOOST TEST RMSE ($): {cb_m['full']['rmse']:,.0f}")
+
+    display(metrics_to_df(cb_m, "CatBoost (Test)"))
 
     # ----------------------------
-    # EXISTING: Train+Val metrics for comparison
+    # Train+Val metrics for comparison
     # ----------------------------
     X_trainval_cb = pd.concat([X_train, X_val], axis=0)
     y_trainval_cb = pd.concat([y_train, y_val], axis=0)
 
-    cb_pred_log_trainval = final_cb.predict(X_trainval_cb)
-    cb_pred_trainval = np.expm1(cb_pred_log_trainval)
+    cb_pred_trainval = np.expm1(final_cb.predict(X_trainval_cb))
     cb_true_trainval = np.expm1(y_trainval_cb)
 
-    # Old
-    cb_mae_trainval = mean_absolute_error(cb_true_trainval, cb_pred_trainval)
-    cb_rmse_trainval = np.sqrt(mean_squared_error(cb_true_trainval, cb_pred_trainval))
-
-    results_cb = pd.DataFrame(
-        {"MAE ($)": [cb_mae_trainval, cb_mae_test],
-         "RMSE ($)": [cb_rmse_trainval, cb_rmse_test]},
-        index=["Train+Val", "Test"]
-    )
-    display(results_cb)
-
-    # New
     cb_tv = metrics_full_and_clipped(cb_true_trainval, cb_pred_trainval, q_low=0.01, q_high=0.99)
     display(metrics_to_df(cb_tv, "CatBoost (Train+Val)"))
 
+    # ----------------------------
     # Feature Importance
+    # ----------------------------
     importances = final_cb.get_feature_importance()
     fi = (
         pd.DataFrame({"feature": X_train.columns, "importance": importances})
         .sort_values("importance", ascending=False)
     )
     display(fi.head(25))
+
+    # Globals for metrics writer (clipped + full)
+    cb_test_full = cb_m["full"]
+    cb_test_clipped = cb_m["clipped"]
+
+    cb_trainval_full = cb_tv["full"]
+    cb_trainval_clipped = cb_tv["clipped"]
+
+    cb_train_full = cb_tr["full"]
+    cb_train_clipped = cb_tr["clipped"]
+
+    cb_val_full = cb_v["full"]
+    cb_val_clipped = cb_v["clipped"]
 ```
 
 ### Keras Neural Network
@@ -1648,55 +1739,102 @@ else:
 SEED = 42
 tf.keras.utils.set_random_seed(SEED)
 np.random.seed(SEED)
+```
+
+```{python}
+# ----------------------------
+# Step -1: Hyperparameters in one place (tune here)
+# ----------------------------
+KERAS_TUNE = {
+    # --- training modes ---
+    "batch_full": 2048,
+    "epochs_full": 120,     # EarlyStopping determines actual stop
+
+    # --- callbacks ---
+    "es_patience_full": 10,
+    "es_patience_smoke": 3,
+    "rlrop_patience_full": 3,
+    "rlrop_patience_smoke": 1,
+    "rlrop_factor": 0.5,
+    "min_lr": 1e-6,
+
+    # --- evaluation/predict ---
+    "pred_batch": 4096,
+
+    # --- tuner (coarse) Hyperband ---
+    "hb_max_epochs_full": 40,
+    "hb_max_epochs_smoke": 12,
+    "hb_factor": 3,
+    "hb_executions_per_trial": 1,
+
+    # --- tuner (fine) Bayesian ---
+    "bayes_epochs_full": 40,
+    "bayes_epochs_smoke": 8,
+    "bayes_max_trials_full": 25,
+    "bayes_max_trials_smoke": 10,
+    "bayes_executions_per_trial": 1,
+
+    # --- smoke speed controls ---
+    "batch_smoke": 1000,
+    "epochs_smoke": 10,
+    "smoke_subsample": True,
+    "smoke_train_n": 5000,
+    "smoke_val_n": 2000,
+
+    # --- base defaults if you run WITHOUT tuner (fallback) ---
+    "fallback_learning_rate": 3e-4,
+    "fallback_loss": "huber",        # "mse" | "mae" | "huber"
+    "fallback_huber_delta": 0.5,
+    "fallback_activation": "silu",   # "silu" | "gelu"
+    "fallback_use_residuals": True,
+}
+```
+
+```{python}
+# ----------------------------
+# Step 1: Define feature columns 
+# ----------------------------
+
+# Keep original globals untouched
+NUM_COLS_BASE = list(num_cols)
+CAT_COLS_BASE = list(cat_cols)
+
+# Keras-specific copies 
+num_cols_nn = list(NUM_COLS_BASE)
+cat_cols_nn = list(CAT_COLS_BASE)
+
+print("Numeric cols (base):", len(NUM_COLS_BASE))
+print("Categorical cols (base):", len(CAT_COLS_BASE))
 
 # ----------------------------
-# Step 1: Define feature columns
-# ----------------------------
-num_cols = [
-    "mileage", "mpg_avg", "price_drop", "seller_rating", "driver_rating",
-    "driver_reviews_num", "accidents_or_damage", "one_owner", "personal_use_only",
-    "age", "mileage_per_year", "engine_liters", "engine_cylinders",
-    "engine_turbo", "engine_hybrid", "transmission_gears", "transmission_gears_missing",
-    "is_luxury_brand",
-]
-cat_cols = [
-    "manufacturer", "model", "drivetrain", "fuel_type", "engine_layout",
-    "transmission_clean", "exterior_color_base", "interior_color_base",
-]
-
-num_cols = [c for c in num_cols if c in X_train.columns]
-cat_cols = [c for c in cat_cols if c in X_train.columns]
-
-print("Numeric cols:", num_cols)
-print("Categorical cols:", cat_cols)
-
-# ----------------------------
-# Step 2: Prepare train/val/test (simple, explicit)
-# - numeric: fill NaNs with train medians
-# - categorical: fill NaNs with "unknown" and cast to string
+# Step 2: Prepare train/val/test (NN copies)
 # ----------------------------
 X_train_nn = X_train.copy()
 X_val_nn   = X_val.copy()
 X_test_nn  = X_test.copy()
 
-# Add engine missing indicators (helps NNs; optional but simple)
+# Add missing indicators
+missing_indicator_cols = []
 for col in ["engine_liters", "engine_cylinders"]:
     if col in X_train_nn.columns:
         miss = f"{col}_missing"
-        X_train_nn[miss] = X_train_nn[col].isna().astype("int64")
-        X_val_nn[miss]   = X_val_nn[col].isna().astype("int64")
-        X_test_nn[miss]  = X_test_nn[col].isna().astype("int64")
-        if miss not in num_cols:
-            num_cols.append(miss)
+        for df_ in (X_train_nn, X_val_nn, X_test_nn):
+            df_[miss] = df_[col].isna().astype("int64")
+        missing_indicator_cols.append(miss)
 
-# numeric impute using TRAIN medians only
-train_medians = X_train_nn[num_cols].median(numeric_only=True)
-X_train_nn[num_cols] = X_train_nn[num_cols].fillna(train_medians)
-X_val_nn[num_cols]   = X_val_nn[num_cols].fillna(train_medians)
-X_test_nn[num_cols]  = X_test_nn[num_cols].fillna(train_medians)
+# Update ONLY the NN numeric list
+for miss in missing_indicator_cols:
+    if miss not in num_cols_nn:
+        num_cols_nn.append(miss)
+
+# numeric impute using TRAIN medians
+train_medians = X_train_nn[num_cols_nn].median(numeric_only=True)
+X_train_nn[num_cols_nn] = X_train_nn[num_cols_nn].fillna(train_medians)
+X_val_nn[num_cols_nn]   = X_val_nn[num_cols_nn].fillna(train_medians)
+X_test_nn[num_cols_nn]  = X_test_nn[num_cols_nn].fillna(train_medians)
 
 # categorical fill/cast
-for c in cat_cols:
+for c in cat_cols_nn:
     X_train_nn[c] = X_train_nn[c].fillna("unknown").astype(str)
     X_val_nn[c]   = X_val_nn[c].fillna("unknown").astype(str)
     X_test_nn[c]  = X_test_nn[c].fillna("unknown").astype(str)
@@ -1707,19 +1845,17 @@ y_val_nn   = y_val.to_numpy().astype("float32")
 y_test_nn  = y_test.to_numpy().astype("float32")
 
 print("Rows:", {"train": len(X_train_nn), "val": len(X_val_nn), "test": len(X_test_nn)})
+print("NN numeric cols:", len(num_cols_nn), "| NN cat cols:", len(cat_cols_nn))
 ```
 
 #### Keras Model Preprossesing 
 ```{python}
 # ----------------------------
-# Step 3: Build preprocessing layers (readable)
+# Step 3: Build preprocessing layers
 # - Normalization for numeric
 # - StringLookup + Embedding per categorical feature
 # ----------------------------
 
-# ----------------------------
-# Keras: decide whether we will TRAIN (and thus need adapt/build)
-# ----------------------------
 latest_path = KERAS_LATEST_PATH if "KERAS_LATEST_PATH" in globals() else (MODEL_DIR / "keras" / "keras_model.keras")
 
 WILL_TRAIN_KERAS = (
@@ -1729,289 +1865,774 @@ WILL_TRAIN_KERAS = (
 
 print("Keras WILL_TRAIN_KERAS =", WILL_TRAIN_KERAS, "| latest exists =", latest_path.exists())
 
+num_norm = None
+lookups = None
+embed_dims = None
+vocab_sizes = None
+
+def suggest_embed_dim(vocab_size: int) -> int:
+    dim = int(np.ceil(np.log2(vocab_size + 1) * 2))
+    return int(np.clip(dim, 8, 50))
+
 if not WILL_TRAIN_KERAS:
     print("⏭️ Skipping adapt/build preprocessing layers (will load existing Keras model later).")
 else:
-    # 3A) Numeric normalization
     num_norm = layers.Normalization(name="num_norm")
-    num_norm.adapt(X_train_nn[num_cols].astype("float32").to_numpy())
+    num_norm.adapt(X_train_nn[num_cols_nn].astype("float32").to_numpy())
 
-    # 3B) Categorical lookups + embedding sizes
     lookups = {}
     embed_dims = {}
     vocab_sizes = {}
 
-    def suggest_embed_dim(vocab_size: int) -> int:
-        dim = int(np.ceil(np.log2(vocab_size + 1) * 2))
-        return int(np.clip(dim, 8, 50))
-
-    for c in cat_cols:
-        lookup = layers.StringLookup(output_mode="int", name=f"{c}_lookup")
+    for c in cat_cols_nn:
+        lookup = layers.StringLookup(
+            output_mode="int",
+            mask_token=None,
+            num_oov_indices=1,
+            name=f"{c}_lookup"
+        )
         lookup.adapt(X_train_nn[c].astype(str).to_numpy())
 
-        vocab_size = lookup.vocabulary_size()
+        vocab_size = int(lookup.vocabulary_size())  # includes OOV bucket
         dim = suggest_embed_dim(vocab_size)
 
         lookups[c] = lookup
-        vocab_sizes[c] = int(vocab_size)
+        vocab_sizes[c] = vocab_size
         embed_dims[c] = int(dim)
 
     print("Embedding plan:")
-    for c in cat_cols:
+    for c in cat_cols_nn:
         print(f"  {c:20s} vocab={vocab_sizes[c]:6d}  emb_dim={embed_dims[c]:2d}")
+
+    # ----------------------------
+    # Freeze preprocessing state for tuner stability
+    # (so each trial gets fresh layer instances)
+    # ----------------------------
+    NUM_NORM_WEIGHTS = num_norm.get_weights()
+
+    LOOKUP_VOCABS = {}
+    for c in cat_cols_nn:
+        lk = lookups[c]
+        try:
+            vocab = lk.get_vocabulary(include_special_tokens=True)
+        except TypeError:
+            vocab = lk.get_vocabulary()
+        LOOKUP_VOCABS[c] = vocab
+
+    # Recompute vocab_sizes from frozen vocabs
+    FROZEN_VOCAB_SIZES = {c: len(LOOKUP_VOCABS[c]) for c in cat_cols_nn}
+
+    print("✅ Frozen preprocessing:")
+    print("  num_norm weights:", [w.shape for w in NUM_NORM_WEIGHTS])
+    print("  lookup vocab sizes:", {c: FROZEN_VOCAB_SIZES[c] for c in cat_cols_nn})
+
 ```
 
 #### Keras Model Building 
 ```{python}
 # ----------------------------
-# Step 4: Build the Keras model (clear architecture)
-# Activation choice:
-# - SiLU/Swish is a strong default for tabular (often smoother than ReLU)
-# - You can switch to 'relu' easily if you want
-# ----------------------------
-
-if not WILL_TRAIN_KERAS:
-    print("⏭️ Skipping model build (will load existing Keras model later).")
-else:
-    # Inputs
-    numeric_in = keras.Input(shape=(len(num_cols),), name="numeric", dtype=tf.float32)
-    cat_inputs = {c: keras.Input(shape=(1,), name=c, dtype=tf.string) for c in cat_cols}
-
-    # Numeric path
-    x_num = num_norm(numeric_in)
-
-    # Categorical paths -> lookup -> embedding -> flatten
-    emb_list = []
-    for c in cat_cols:
-        x = lookups[c](cat_inputs[c])
-        x = layers.Embedding(input_dim=vocab_sizes[c], output_dim=embed_dims[c], name=f"{c}_emb")(x)
-        x = layers.Reshape((embed_dims[c],), name=f"{c}_emb_flat")(x)
-        emb_list.append(x)
-
-    # Concatenate all
-    x = layers.Concatenate(name="concat")([x_num] + emb_list)
-
-    x = layers.Dense(256, kernel_initializer="he_normal")(x)
-    x = layers.BatchNormalization()(x)
-    x = layers.Activation(tf.keras.activations.silu)(x)
-    x = layers.Dropout(0.30)(x)
-
-    x = layers.Dense(128, kernel_initializer="he_normal")(x)
-    x = layers.BatchNormalization()(x)
-    x = layers.Activation(tf.keras.activations.silu)(x)
-    x = layers.Dropout(0.25)(x)
-
-    x = layers.Dense(64, kernel_initializer="he_normal")(x)
-    x = layers.BatchNormalization()(x)
-    x = layers.Activation(tf.keras.activations.silu)(x)
-    x = layers.Dropout(0.20)(x)
-
-    out = layers.Dense(1, name="pred_log1p")(x)
-
-    model = keras.Model(
-        inputs={"numeric": numeric_in, **cat_inputs},
-        outputs=out,
-        name="tabular_nn_embeddings"
-    )
-
-    model.compile(
-        optimizer=keras.optimizers.Adam(learning_rate=1e-3),
-        loss="mse",
-        metrics=[keras.metrics.RootMeanSquaredError(name="rmse_log")]
-    )
-
-    display(model.summary())
-
-# ----------------------------
-# Step 5: Convert pandas -> Keras-friendly input dicts
+# Step 4: Convert pandas -> Keras-friendly input dicts
 # ----------------------------
 def to_input_dict(Xdf: pd.DataFrame):
-    d = {"numeric": Xdf[num_cols].astype("float32").to_numpy()}
-    for c in cat_cols:
-        d[c] = Xdf[c].astype(str).to_numpy()
+    d = {"numeric": Xdf[num_cols_nn].to_numpy(dtype=np.float32, copy=True)}
+    for c in cat_cols_nn:
+        d[c] = Xdf[c].astype(str).to_numpy(copy=True)
     return d
 
 train_inputs = to_input_dict(X_train_nn)
 val_inputs   = to_input_dict(X_val_nn)
 test_inputs  = to_input_dict(X_test_nn)
+
+# ----------------------------
+# Step 5: Model builder (HP-aware) + Tuner integration
+#   - Build fresh preprocessing layers per trial to avoid KerasTuner state reuse issues.
+#   - Uses frozen NUM_NORM_WEIGHTS + LOOKUP_VOCABS.
+# ----------------------------
+
+def _activation_layer(x, act_name: str):
+    if act_name == "gelu":
+        return layers.Activation("gelu")(x)
+    return layers.Activation(tf.keras.activations.silu)(x)  # default silu
+
+
+def build_model_from_hp(hp):
+    """
+    KerasTuner model builder.
+    Predicts log1p(price). Train/validate in log space; evaluate in dollars later.
+    Uses a bounded tanh output head to prevent expm1 overflow.
+
+    Expects these to exist (from Step 3):
+      - NUM_NORM_WEIGHTS
+      - LOOKUP_VOCABS
+      - vocab_sizes (or recompute from LOOKUP_VOCABS)
+      - embed_dims
+    """
+
+    # ----------------------------
+    # Hyperparameters
+    # ----------------------------
+    act = hp.Choice("activation", ["silu", "gelu"], default=KERAS_TUNE["fallback_activation"])
+
+    lr = hp.Float(
+        "learning_rate", min_value=1e-4, max_value=3e-3, sampling="log",
+        default=KERAS_TUNE["fallback_learning_rate"]
+    )
+
+    use_res = hp.Boolean("use_residuals", default=KERAS_TUNE["fallback_use_residuals"])
+
+    l2 = hp.Choice("l2", values=[0.0, 1e-7, 1e-6, 1e-5], default=1e-6)
+    emb_l2 = hp.Choice("embedding_l2", values=[0.0, 1e-7, 1e-6, 1e-5], default=1e-6)
+
+    d1 = hp.Int("dense1", min_value=256, max_value=1024, step=256, default=512)
+    d2 = hp.Int("dense2", min_value=128, max_value=512, step=128, default=256)
+    d3 = hp.Int("dense3", min_value=64,  max_value=256, step=64,  default=128)
+
+    drop1 = hp.Float("drop1", min_value=0.1, max_value=0.5, step=0.1, default=0.3)
+    drop2 = hp.Float("drop2", min_value=0.1, max_value=0.5, step=0.1, default=0.25)
+    drop3 = hp.Float("drop3", min_value=0.1, max_value=0.5, step=0.1, default=0.2)
+
+    loss_name = hp.Choice("loss", ["mse", "mae", "huber"], default=KERAS_TUNE["fallback_loss"])
+    huber_delta = hp.Float(
+        "huber_delta", min_value=0.3, max_value=1.5, step=0.2,
+        default=KERAS_TUNE["fallback_huber_delta"]
+    )
+
+    clipnorm = hp.Choice("clipnorm", values=[0.5, 1.0, 1.5, 2.0], default=1.0)
+
+    # ----------------------------
+    # Output bounds for log1p(price)
+    # ----------------------------
+    LOG_CENTER = 10.5
+    LOG_SCALE  = 4.5
+
+    # ----------------------------
+    # Inputs
+    # ----------------------------
+    numeric_in = keras.Input(shape=(len(num_cols_nn),), name="numeric", dtype=tf.float32)
+    cat_inputs_local = {c: keras.Input(shape=(), name=c, dtype=tf.string) for c in cat_cols_nn}
+
+    # ----------------------------
+    # Fresh preprocessing layers per trial
+    # ----------------------------
+    # Fresh preprocessing layers per trial
+    num_norm_local = layers.Normalization(name="num_norm")
+
+    # Build before set_weights (otherwise expects 0 weights)
+    num_norm_local.build((None, len(num_cols_nn)))
+
+    # Now it can accept the adapted weights
+    num_norm_local.set_weights(NUM_NORM_WEIGHTS)
+
+    lookups_local = {}
+    vocab_sizes_local = {}
+    for c in cat_cols_nn:
+        lk = layers.StringLookup(
+            output_mode="int",
+            mask_token=None,
+            num_oov_indices=1,
+            name=f"{c}_lookup"
+        )
+        # Use frozen vocab so every trial sees identical mapping
+        lk.set_vocabulary(LOOKUP_VOCABS[c])
+        lookups_local[c] = lk
+        vocab_sizes_local[c] = int(lk.vocabulary_size())
+
+    # ----------------------------
+    # Numeric path
+    # ----------------------------
+    x_num = num_norm_local(numeric_in)
+
+    # ----------------------------
+    # Categorical embedding paths
+    # ----------------------------
+    emb_list = []
+    emb_reg = keras.regularizers.l2(emb_l2) if (emb_l2 and emb_l2 > 0) else None
+
+    for c in cat_cols_nn:
+        xi = lookups_local[c](cat_inputs_local[c])
+        xi = layers.Embedding(
+            input_dim=vocab_sizes_local[c],
+            output_dim=embed_dims[c],
+            embeddings_regularizer=emb_reg,
+            name=f"{c}_emb"
+        )(xi)
+        xi = layers.Reshape((embed_dims[c],), name=f"{c}_emb_flat")(xi)
+        emb_list.append(xi)
+
+    x = layers.Concatenate(name="concat")([x_num] + emb_list)
+
+    reg = keras.regularizers.l2(l2) if (l2 and l2 > 0) else None
+
+    # ----------------------------
+    # Dense blocks
+    # ----------------------------
+    # Block 1 (d1)
+    y = layers.Dense(d1, kernel_initializer="he_normal", kernel_regularizer=reg)(x)
+    y = layers.BatchNormalization()(y)
+    y = _activation_layer(y, act)
+    y = layers.Dropout(drop1)(y)
+    x = y
+
+    # Block 2 (d2)
+    y = layers.Dense(d2, kernel_initializer="he_normal", kernel_regularizer=reg)(x)
+    y = layers.BatchNormalization()(y)
+    y = _activation_layer(y, act)
+    y = layers.Dropout(drop2)(y)
+    if use_res:
+        skip = x
+        if int(skip.shape[-1]) != d2:
+            skip = layers.Dense(d2, kernel_regularizer=reg)(skip)
+        x = layers.Add()([y, skip])
+    else:
+        x = y
+
+    # Block 3 (d3)
+    y = layers.Dense(d3, kernel_initializer="he_normal", kernel_regularizer=reg)(x)
+    y = layers.BatchNormalization()(y)
+    y = _activation_layer(y, act)
+    y = layers.Dropout(drop3)(y)
+    if use_res:
+        skip = x
+        if int(skip.shape[-1]) != d3:
+            skip = layers.Dense(d3, kernel_regularizer=reg)(skip)
+        x = layers.Add()([y, skip])
+    else:
+        x = y
+
+    # ----------------------------
+    # Bounded output head (log1p)
+    # ----------------------------
+    out_raw = layers.Dense(1, name="pred_raw")(x)
+    out = layers.Lambda(
+        lambda z: LOG_CENTER + LOG_SCALE * tf.math.tanh(z),
+        name="pred_log1p"
+    )(out_raw)
+
+    model_local = keras.Model(
+        inputs={"numeric": numeric_in, **cat_inputs_local},
+        outputs=out,
+        name="tabular_nn_embeddings_tuned"
+    )
+
+    # Loss
+    if loss_name == "huber":
+        loss_fn = keras.losses.Huber(delta=huber_delta)
+    else:
+        loss_fn = loss_name
+
+    model_local.compile(
+        optimizer=keras.optimizers.Adam(learning_rate=lr, clipnorm=clipnorm),
+        loss=loss_fn,
+        metrics=[keras.metrics.RootMeanSquaredError(name="rmse_log")]
+    )
+
+    return model_local
 ```
 
 #### Keras Model Training 
 ```{python}
 # ----------------------------
-# Step 6: Train or Load (EarlyStopping + ReduceLROnPlateau + checkpoint)
+# Step 6: Train or Load + Tuning (Hyperband -> Bayesian)
 # ----------------------------
-
-# Expect these globals already exist from your earlier setup:
-# - TRAIN_MODE in {"skip","smoke","full"}
-# - RETRAIN_KERAS: bool
-# - KERAS_DIR, KERAS_RUNS_DIR created earlier (or we create them here safely)
-# - model already built/compiled if we're going to train
-# - train_inputs, val_inputs, y_train_nn, y_val_nn exist if we're going to train
-
-# ----------------------------
-# Step 6: Train or Load
-# ----------------------------
-
-latest_path = KERAS_LATEST_PATH
-KERAS_RUNS_DIR = KERAS_RUNS_DIR
-KERAS_DIR = KERAS_DIR 
 
 history = None
 KERAS_RUN_DIR = None
+model = None
 
+SMOKE = (TRAIN_MODE == "smoke")
+
+# consistent callbacks (weights-only checkpoints)
+def make_callbacks(best_weights_path: str, train_mode: str):
+    if train_mode == "smoke":
+        ES_PAT = KERAS_TUNE["es_patience_smoke"]
+        RL_PAT = KERAS_TUNE["rlrop_patience_smoke"]
+    else:
+        ES_PAT = KERAS_TUNE["es_patience_full"]
+        RL_PAT = KERAS_TUNE["rlrop_patience_full"]
+
+    return [
+        keras.callbacks.EarlyStopping(
+            monitor="val_loss",
+            patience=ES_PAT,
+            restore_best_weights=True
+        ),
+        keras.callbacks.ReduceLROnPlateau(
+            monitor="val_loss",
+            factor=KERAS_TUNE["rlrop_factor"],
+            patience=RL_PAT,
+            min_lr=KERAS_TUNE["min_lr"]
+        ),
+        keras.callbacks.ModelCheckpoint(
+            filepath=best_weights_path,
+            monitor="val_loss",
+            save_best_only=True,
+            save_weights_only=True
+        ),
+    ]
+
+# write run info
+def write_run_info(run_dir, extra: dict):
+    info = {
+        "train_mode": TRAIN_MODE,
+        "timestamp": datetime.now().strftime("%Y%m%d_%H%M%S"),
+        "num_cols": list(num_cols_nn),
+        "cat_cols": list(cat_cols_nn),
+        "train_medians": {k: float(v) for k, v in train_medians.to_dict().items()},
+        **extra
+    }
+    atomic_write_json(run_dir / "run_info.json", info)
+
+# Minimal dataset wrapper (prevents intermittent tuner/batchnorm shape issues on full runs)
+AUTOTUNE = tf.data.AUTOTUNE
+
+def make_ds(inputs, y, batch_size: int, training: bool):
+    ds = tf.data.Dataset.from_tensor_slices((inputs, y))
+    if training:
+        ds = ds.shuffle(min(len(y), 50_000), seed=SEED, reshuffle_each_iteration=True)
+        ds = ds.batch(batch_size, drop_remainder=True)   
+    else:
+        ds = ds.batch(batch_size, drop_remainder=False)
+    return ds.prefetch(AUTOTUNE)
+
+# -------------------------------------------------------
 # 1) SKIP mode: load latest if available
+# -------------------------------------------------------
 if TRAIN_MODE == "skip":
     if latest_path.exists():
         print("✅ TRAIN_MODE='skip' — loading latest Keras model:\n ", latest_path)
-        model = keras.models.load_model(latest_path)
+        model = keras.models.load_model(latest_path, compile=False)
     else:
         print("⏭️ TRAIN_MODE='skip' — no latest Keras model found, skipping.")
         model = None
 
+# -------------------------------------------------------
 # 2) FULL mode: load latest unless retraining
+# -------------------------------------------------------
 elif (TRAIN_MODE == "full") and latest_path.exists() and (not RETRAIN_KERAS):
     print("✅ Loading existing Keras latest model (RETRAIN_KERAS=False, TRAIN_MODE='full'):\n ", latest_path)
-    model = keras.models.load_model(latest_path)
+    model = keras.models.load_model(latest_path, compile=False)
 
-# 3) Otherwise TRAIN (smoke always trains; full trains if retraining or missing latest)
+# -------------------------------------------------------
+# 3) Otherwise TRAIN/TUNE
+# -------------------------------------------------------
 else:
-    if model is None:
-        raise RuntimeError(
-            "Keras training requested, but `model` is None. "
-            "Make sure Step 4 ran (model built/compiled) before Step 6."
-        )
-
-    if TRAIN_MODE == "smoke":
-        print("🧪 Smoke mode: training a quick sanity-check run (will NOT update latest).")
-        EPOCHS = 10
-        BATCH = 1024
-    else:
-        print("🔁 Training Keras (full).")
-        EPOCHS = 50
-        BATCH = 2048
+    if not WILL_TRAIN_KERAS:
+        raise RuntimeError("WILL_TRAIN_KERAS=False but training branch entered. Check logic.")
 
     run_ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     KERAS_RUN_DIR = KERAS_RUNS_DIR / f"run_{run_ts}_{TRAIN_MODE}"
     KERAS_RUN_DIR.mkdir(parents=True, exist_ok=True)
 
-    best_path = KERAS_RUN_DIR / "best.keras"
     versioned_path = KERAS_RUN_DIR / "keras_model.keras"
 
-    callbacks = [
-        keras.callbacks.EarlyStopping(
-            monitor="val_loss",
-            patience=8 if TRAIN_MODE == "full" else 3,
-            restore_best_weights=True
-        ),
-        keras.callbacks.ReduceLROnPlateau(
-            monitor="val_loss",
-            factor=0.5,
-            patience=3 if TRAIN_MODE == "full" else 1,
-            min_lr=1e-6
-        ),
-        keras.callbacks.ModelCheckpoint(
-            filepath=str(best_path),
-            monitor="val_loss",
-            save_best_only=True
+    # ----------------------------
+    # Tuner directories (SEPARATE)
+    # ----------------------------
+    hb_dir = KERAS_RUN_DIR / "tuning" / "hyperband"
+    bo_dir = KERAS_RUN_DIR / "tuning" / "bayes"
+    hb_dir.mkdir(parents=True, exist_ok=True)
+    bo_dir.mkdir(parents=True, exist_ok=True)
+
+    # ----------------------------
+    # Budgets per mode
+    # ----------------------------
+    if SMOKE:
+        EPOCHS = KERAS_TUNE["epochs_smoke"]
+        HB_MAX_EPOCHS = KERAS_TUNE["hb_max_epochs_smoke"]
+        BAYES_EPOCHS = KERAS_TUNE["bayes_epochs_smoke"]
+        BAYES_TRIALS = KERAS_TUNE["bayes_max_trials_smoke"]
+        BATCH = KERAS_TUNE["batch_smoke"]
+        HB_EXEC = KERAS_TUNE["hb_executions_per_trial"]
+        BAYES_EXEC = KERAS_TUNE["bayes_executions_per_trial"]
+    else:
+        EPOCHS = KERAS_TUNE["epochs_full"]
+        HB_MAX_EPOCHS = KERAS_TUNE["hb_max_epochs_full"]
+        BAYES_EPOCHS = KERAS_TUNE["bayes_epochs_full"]
+        BAYES_TRIALS = KERAS_TUNE["bayes_max_trials_full"]
+        BATCH = KERAS_TUNE["batch_full"]
+        HB_EXEC = KERAS_TUNE["hb_executions_per_trial"]
+        BAYES_EXEC = KERAS_TUNE["bayes_executions_per_trial"]
+
+    # ----------------------------
+    # Optional SMOKE subsampling (keeps tuner, but faster)
+    # ----------------------------
+    if SMOKE and KERAS_TUNE.get("smoke_subsample", False):
+        rs = np.random.RandomState(SEED)
+
+        ntr = min(int(KERAS_TUNE.get("smoke_train_n", 20000)), len(y_train_nn))
+        nva = min(int(KERAS_TUNE.get("smoke_val_n", 5000)), len(y_val_nn))
+
+        idx_tr = rs.choice(len(y_train_nn), size=ntr, replace=False)
+        idx_va = rs.choice(len(y_val_nn),   size=nva, replace=False)
+
+        train_inputs_run = {k: v[idx_tr] for k, v in train_inputs.items()}
+        y_train_run = y_train_nn[idx_tr]
+
+        val_inputs_run = {k: v[idx_va] for k, v in val_inputs.items()}
+        y_val_run = y_val_nn[idx_va]
+
+        print(
+            f"🧪 Smoke subsample enabled: train={ntr:,} val={nva:,} | "
+            f"batch={BATCH} | hb_epochs={HB_MAX_EPOCHS} | bayes_epochs={BAYES_EPOCHS} | bayes_trials={BAYES_TRIALS}"
         )
-    ]
+    else:
+        train_inputs_run, y_train_run = train_inputs, y_train_nn
+        val_inputs_run, y_val_run = val_inputs, y_val_nn
+
+    # Create datasets once and reuse for tuner + final fit
+    train_ds = make_ds(train_inputs_run, y_train_run, BATCH, training=True)
+    val_ds   = make_ds(val_inputs_run,   y_val_run,   BATCH, training=False)
+
+    # Objective: minimize validation loss in log space
+    objective = kt.Objective("val_loss", direction="min")
+
+    print("num feature count =", len(num_cols_nn))
+    print("cat feature count =", len(cat_cols_nn))
+    print("train numeric shape =", train_inputs["numeric"].shape)
+    print("one cat example shape =", train_inputs[cat_cols_nn[0]].shape if cat_cols_nn else None)
+    print("y_train shape =", y_train_nn.shape)
 
     # ----------------------------
-    print("TRAIN_MODE =", TRAIN_MODE, "| epochs=", EPOCHS, "| batch=", BATCH)
-    print("train rows =", len(X_train_nn), "val rows =", len(X_val_nn))
+    # TUNING STAGE 1 (coarse): Hyperband
     # ----------------------------
+    print("🧭 TUNING STAGE 1 (coarse): Hyperband")
+    gc.collect()
 
-    # ✅ ACTUAL TRAINING (now reachable)
-    history = model.fit(
-        train_inputs, y_train_nn,
-        validation_data=(val_inputs, y_val_nn),
-        epochs=EPOCHS,
-        batch_size=BATCH,
-        verbose=2,
-        callbacks=callbacks
+    hb_best_weights_path = str(hb_dir / "best_tuning.weights.h5")
+    hb_callbacks = make_callbacks(hb_best_weights_path, TRAIN_MODE)
+
+    hb = kt.Hyperband(
+        hypermodel=build_model_from_hp,
+        objective=objective,
+        max_epochs=HB_MAX_EPOCHS,
+        factor=KERAS_TUNE["hb_factor"],
+        executions_per_trial=HB_EXEC,
+        directory=str(hb_dir),
+        project_name=f"run_{run_ts}",
+        overwrite=True,
     )
 
-    # ----------------------------
-    print("History keys:", history.history.keys())
-    print("KERAS_RUN_DIR =", KERAS_RUN_DIR)
-    # ----------------------------
+    hb.search(
+        train_ds,
+        validation_data=val_ds,
+        epochs=HB_MAX_EPOCHS,
+        callbacks=hb_callbacks,
+        verbose=0,
+    )
 
-    # Load best checkpoint explicitly
-    if best_path.exists():
-        model = keras.models.load_model(best_path)
-        print("✅ Loaded best checkpoint:", best_path)
+    best_hp_hb = hb.get_best_hyperparameters(1)[0]
+    print("✅ Best HP from Hyperband:", best_hp_hb.values)
 
-    # Save versioned always
+    # ----------------------------
+    # TUNING STAGE 2 (fine): BayesianOptimization
+    # ----------------------------
+    print("🎯 TUNING STAGE 2 (fine): BayesianOptimization")
+    tf.keras.backend.clear_session()
+    gc.collect()
+
+    bo_best_weights_path = str(bo_dir / "best_tuning.weights.h5")
+    bo_callbacks = make_callbacks(bo_best_weights_path, TRAIN_MODE)
+
+    bo = kt.BayesianOptimization(
+        hypermodel=build_model_from_hp,
+        objective=objective,
+        max_trials=BAYES_TRIALS,
+        executions_per_trial=BAYES_EXEC,
+        directory=str(bo_dir),
+        project_name=f"run_{run_ts}",
+        overwrite=True,
+    )
+
+    bo.search(
+        train_ds,
+        validation_data=val_ds,
+        epochs=BAYES_EPOCHS,   
+        callbacks=bo_callbacks,
+        verbose=0,
+    )
+
+    best_hp = bo.get_best_hyperparameters(1)[0]
+    print("🏆 Best HP from BayesianOptimization:", best_hp.values)
+
+    # ----------------------------
+    # FINAL FIT using best HP (FROM SCRATCH)
+    # ----------------------------
+    print("🔁 Final training with best hyperparameters (from scratch)")
+    tf.keras.backend.clear_session()
+    gc.collect()
+
+    model = build_model_from_hp(best_hp)
+
+    final_best_weights_path = str(KERAS_RUN_DIR / "best_final.weights.h5")
+    final_callbacks = make_callbacks(final_best_weights_path, TRAIN_MODE)
+
+    history = model.fit(
+        train_ds,
+        validation_data=val_ds,
+        epochs=EPOCHS,
+        verbose=0,
+        callbacks=final_callbacks
+    )
+
+    # Load best FINAL weights explicitly (weights-only checkpoint)
+    if os.path.exists(final_best_weights_path):
+        model.load_weights(final_best_weights_path)
+        print("✅ Loaded best FINAL weights:", final_best_weights_path)
+
+    # Save FULL model artifact
     model.save(versioned_path)
-    print("💾 Saved versioned model:", versioned_path)
+    print("💾 Saved versioned FULL model:", versioned_path)
 
     # Update "latest" only for full mode
     if TRAIN_MODE == "full":
         model.save(latest_path)
-        print("✅ Updated latest model:", latest_path)
+        print("✅ Updated latest FULL model:", latest_path)
     else:
         print("🚫 Smoke run: NOT updating latest pointer.")
 
-    atomic_write_json(KERAS_RUN_DIR / "run_info.json", {
-        "train_mode": TRAIN_MODE,
-        "timestamp": run_ts,
-        "num_cols": list(num_cols),
-        "cat_cols": list(cat_cols),
+    # Persist tuning results + chosen hp
+    write_run_info(KERAS_RUN_DIR, extra={
+        "tuning": {
+            "strategy": "hyperband_then_bayes",
+            "hyperband_best": dict(best_hp_hb.values),
+            "bayes_best": dict(best_hp.values),
+            "hb_max_epochs": int(HB_MAX_EPOCHS),
+            "bayes_epochs": int(BAYES_EPOCHS),
+            "bayes_max_trials": int(BAYES_TRIALS),
+            "hyperband_dir": str(hb_dir),
+            "bayes_dir": str(bo_dir),
+            "smoke_subsample": bool(SMOKE and KERAS_TUNE.get("smoke_subsample", False)),
+            "smoke_train_n": int(KERAS_TUNE.get("smoke_train_n", 0)) if SMOKE else None,
+            "smoke_val_n": int(KERAS_TUNE.get("smoke_val_n", 0)) if SMOKE else None,
+            "batch": int(BATCH),
+            "final_epochs_cap": int(EPOCHS),
+        }
     })
 
-    atomic_write_json(KERAS_RUN_DIR / "train_medians.json", {
-        k: float(v) for k, v in train_medians.to_dict().items()
-    })
-
+    atomic_write_json(KERAS_RUN_DIR / "best_hp.json", dict(best_hp.values))
+    print("🧾 Wrote best_hp.json:", KERAS_RUN_DIR / "best_hp.json")
 ```
 
 #### Keras Evaluation 
 ```{python}
+# ==========================================================
+# Keras Model Evaluation
+# ==========================================================
 # ----------------------------
-# Step 7: Evaluate (dollars) with FULL + CLIPPED
+# Step 7: Evaluate (dollars) with full + clipped
+# + Permutation importance (per-feature + optional subsample)
+# + Training curves (if history exists)
+# Ensures globals for metrics writer cell are set.
 # ----------------------------
 
 if ("model" not in globals()) or (model is None):
     print("⚠️ Keras model is not available — skipping evaluation.")
 else:
-    # Test
-    pred_log_test = model.predict(test_inputs, batch_size=4096).ravel()
-    pred_test = np.expm1(pred_log_test)
-    true_test = np.expm1(y_test_nn)
+    # ----------------------------
+    # Helper: safe predict -> dollars
+    # ----------------------------
+    def _predict_dollars(inputs: dict) -> np.ndarray:
+        pred_log = model.predict(
+            inputs,
+            batch_size=KERAS_TUNE["pred_batch"],
+            verbose=0
+        ).ravel()
 
-    keras_test_m = show_metrics_table("Keras", true_test, pred_test)
+        # Safety: replace NaN/Inf if something went wrong
+        pred_log = np.nan_to_num(pred_log, nan=0.0, posinf=15.0, neginf=6.0)
 
-    # Train+Val
+        # Convert to dollars in float64
+        return np.expm1(pred_log.astype("float64"))
+
+    # ----------------------------
+    # TEST metrics (full + clipped)
+    # ----------------------------
+    true_test = np.expm1(y_test_nn.astype("float64"))
+    pred_test = _predict_dollars(test_inputs)
+
+    keras_test_m = metrics_full_and_clipped(true_test, pred_test, q_low=0.01, q_high=0.99)
+    display(metrics_to_df(keras_test_m, "Keras (Test)"))
+
+    # ----------------------------
+    # Train+Val metrics (full + clipped)
+    # ----------------------------
     X_trainval_nn = pd.concat([X_train_nn, X_val_nn], axis=0)
     y_trainval_nn = np.concatenate([y_train_nn, y_val_nn], axis=0)
     trainval_inputs = to_input_dict(X_trainval_nn)
 
-    pred_log_trainval = model.predict(trainval_inputs, batch_size=4096, verbose=0).ravel()
-    pred_trainval = np.expm1(pred_log_trainval)
-    true_trainval = np.expm1(y_trainval_nn)
+    true_trainval = np.expm1(y_trainval_nn.astype("float64"))
+    pred_trainval = _predict_dollars(trainval_inputs)
 
-    keras_trainval_m = show_metrics_table("Keras (Train+Val)", true_trainval, pred_trainval)
+    keras_trainval_m = metrics_full_and_clipped(true_trainval, pred_trainval, q_low=0.01, q_high=0.99)
+    display(metrics_to_df(keras_trainval_m, "Keras (Train+Val)"))
 
-    # Optional globals for your JSON metrics writer
-    keras_mae_test = keras_test_m["full"]["mae"]
-    keras_rmse_test = keras_test_m["full"]["rmse"]
-    keras_mae_trainval = keras_trainval_m["full"]["mae"]
-    keras_rmse_trainval = keras_trainval_m["full"]["rmse"]
+    # Globals for your metrics
+    keras_test_full = keras_test_m["full"]
     keras_test_clipped = keras_test_m["clipped"]
+    keras_trainval_full = keras_trainval_m["full"]
     keras_trainval_clipped = keras_trainval_m["clipped"]
 
-    print("✅ Done: Keras NN trained and evaluated.")
+    # ----------------------------
+    # Permutation importance (per-feature + optional subsample)
+    # - Numeric features: permute 1 numeric column at a time.
+    # - Categorical features: permute 1 categorical input at a time (each cat col is its own key).
+    # - Optional row subsample for speed.
+    # ----------------------------
+    def permutation_importance_keras_per_feature(
+        base_inputs: dict,
+        y_true_dollars: np.ndarray,
+        *,
+        n_repeats: int = 3,
+        seed: int = 42,
+        max_rows: int | None = 20000,   # speed knob: set None for full test set
+        include_categoricals: bool = True,
+    ):
+        rs = np.random.RandomState(seed)
+
+        # ----------------------------
+        # 0) Subsample rows for speed (optional)
+        # ----------------------------
+        N = len(y_true_dollars)
+        if (max_rows is not None) and (N > max_rows):
+            idx_rows = rs.choice(N, size=max_rows, replace=False)
+
+            sub_inputs = {}
+            for k, v in base_inputs.items():
+                if k == "numeric":
+                    sub_inputs[k] = v[idx_rows, :]
+                else:
+                    sub_inputs[k] = v[idx_rows]
+            y_sub = y_true_dollars[idx_rows]
+        else:
+            sub_inputs = {k: v.copy() for k, v in base_inputs.items()}
+            y_sub = y_true_dollars
+
+        # ----------------------------
+        # 1) Baseline RMSE (on the chosen subset)
+        # ----------------------------
+        base_pred = _predict_dollars(sub_inputs)
+        base_rmse = float(np.sqrt(np.mean((y_sub - base_pred) ** 2)))
+
+        rows = []
+
+        # ----------------------------
+        # 2) Numeric per-column importance
+        # ----------------------------
+        Xnum = sub_inputs["numeric"]
+        d = int(Xnum.shape[1])
+
+        # Nice labels if num_cols_nn matches the numeric matrix width
+        if ("num_cols_nn" in globals()) and (len(num_cols_nn) == d):
+            num_names = list(num_cols_nn)
+        else:
+            num_names = [f"num_{j}" for j in range(d)]
+
+        for j in range(d):
+            deltas = []
+            for _ in range(n_repeats):
+                pert = {k: v.copy() for k, v in sub_inputs.items()}
+
+                idx = rs.permutation(len(y_sub))
+
+                pert_num = pert["numeric"]
+                pert_num[:, j] = pert_num[idx, j]
+                pert["numeric"] = pert_num
+
+                pred = _predict_dollars(pert)
+                rmse = float(np.sqrt(np.mean((y_sub - pred) ** 2)))
+                deltas.append(rmse - base_rmse)
+
+            rows.append({
+                "feature": num_names[j],
+                "feature_type": "numeric",
+                "rmse_increase": float(np.mean(deltas)),
+                "rmse_increase_std": float(np.std(deltas)),
+            })
+
+        # ----------------------------
+        # 3) Categorical per-key importance (optional)
+        # ----------------------------
+        if include_categoricals:
+            for key in sub_inputs.keys():
+                if key == "numeric":
+                    continue
+
+                deltas = []
+                for _ in range(n_repeats):
+                    pert = {k: v.copy() for k, v in sub_inputs.items()}
+                    idx = rs.permutation(len(y_sub))
+
+                    pert[key] = pert[key][idx]
+
+                    pred = _predict_dollars(pert)
+                    rmse = float(np.sqrt(np.mean((y_sub - pred) ** 2)))
+                    deltas.append(rmse - base_rmse)
+
+                rows.append({
+                    "feature": key,
+                    "feature_type": "categorical",
+                    "rmse_increase": float(np.mean(deltas)),
+                    "rmse_increase_std": float(np.std(deltas)),
+                })
+
+        df_pi = (
+            pd.DataFrame(rows)
+            .sort_values("rmse_increase", ascending=False)
+            .reset_index(drop=True)
+        )
+        return base_rmse, df_pi
+
+    try:
+        base_rmse_pi, pi_df = permutation_importance_keras_per_feature(
+            test_inputs,
+            true_test,
+            n_repeats=3,
+            seed=SEED if "SEED" in globals() else 42,
+            max_rows=20000,               
+            include_categoricals=True    
+        )
+        print(f"Baseline TEST RMSE ($) [subset for PI]: {base_rmse_pi:,.0f}")
+        display(pi_df.head(30))
+    except Exception as e:
+        print("⚠️ Permutation importance failed:", e)
+
+    # ----------------------------
+    # Training curves (if this run trained in-session)
+    # ----------------------------
+    if ("history" in globals()) and (history is not None):
+        hist = history.history if hasattr(history, "history") else {}
+        if ("loss" in hist) or ("val_loss" in hist):
+            plt.figure(figsize=(7, 4))
+            if "loss" in hist:
+                plt.plot(hist["loss"], label="loss")
+            if "val_loss" in hist:
+                plt.plot(hist["val_loss"], label="val_loss")
+            plt.xlabel("Epoch")
+            plt.ylabel("Loss")
+            plt.title("Keras Training Curves")
+            plt.legend()
+            plt.tight_layout()
+            plt.show()
+        else:
+            print("ℹ️ history exists but does not contain loss/val_loss keys.")
+    else:
+        print("ℹ️ No training history available (likely loaded model or training skipped).")
+
+    print("✅ Done: Keras NN tuned/trained and evaluated (with permutation importance + curves).")
 ```
 
 ### Metrics Savepoint
 ```{python}
 # -------------------------
-# Save Metrics (record-only; NO re-evaluation here)
+# Save Metrics
+# Standard schema across models:
+#   metrics[model]["trainval"]["full"/"clipped"]
+#   metrics[model]["test"]["full"/"clipped"]
 # -------------------------
 
 metrics = {}
 
+# ---- Meta ----
 metrics["_meta"] = {
     "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
     "train_mode": TRAIN_MODE if "TRAIN_MODE" in globals() else None,
@@ -2026,88 +2647,97 @@ metrics["_meta"] = {
         "basis": "y_true_quantiles",
         "q_low": 0.01,
         "q_high": 0.99,
-        "note": "Clipped metrics computed on subsets where true price is within [q_low, q_high] quantiles; predictions are never used for clipping.",
+        "note": (
+            "Clipped metrics computed on subsets where true price is within "
+            "[q_low, q_high] quantiles; predictions are never used for clipping."
+        ),
     },
 }
 
-# ---------- Ridge metrics (record-only) ----------
-ridge_vars_exist = all(name in globals() for name in [
-    "ridge_mae_trainval", "ridge_rmse_trainval", "ridge_mae_test", "ridge_rmse_test"
-])
+# Helper: safe string-or-None
+def _str_or_none(x):
+    return str(x) if x is not None else None
 
-if ridge_vars_exist:
+# Helper: build a split metrics object from globals
+def _split_payload(full_key: str, clipped_key: str):
+    full = globals().get(full_key, None)
+    clipped = globals().get(clipped_key, None)
+    return {
+        "full": full,
+        "clipped": clipped,
+    }
+
+# -------------------------
+# Ridge metrics
+# Requires you to set these in Ridge eval:
+#   ridge_test_full, ridge_test_clipped
+#   ridge_trainval_full, ridge_trainval_clipped
+# -------------------------
+if all(k in globals() for k in ["ridge_test_full", "ridge_test_clipped",
+                                "ridge_trainval_full", "ridge_trainval_clipped"]):
     metrics["ridge"] = {
-        "trainval_mae": float(ridge_mae_trainval),
-        "trainval_rmse": float(ridge_rmse_trainval),
-        "test_mae": float(ridge_mae_test),
-        "test_rmse": float(ridge_rmse_test),
+        "trainval": _split_payload("ridge_trainval_full", "ridge_trainval_clipped"),
+        "test": _split_payload("ridge_test_full", "ridge_test_clipped"),
     }
-
-    # Optional: include clipped if you computed these earlier
-    if "ridge_test_clipped" in globals() and ridge_test_clipped is not None:
-        metrics["ridge"]["test_clipped"] = ridge_test_clipped
-    if "ridge_trainval_clipped" in globals() and ridge_trainval_clipped is not None:
-        metrics["ridge"]["trainval_clipped"] = ridge_trainval_clipped
-
 else:
-    print("ℹ️ Skipping Ridge metrics write (need ridge_mae_trainval/ridge_rmse_trainval/ridge_mae_test/ridge_rmse_test).")
+    print("ℹ️ Skipping Ridge metrics write (need ridge_*_full and ridge_*_clipped).")
 
-# ---------- CatBoost metrics (record-only) ----------
-cb_vars_exist = all(name in globals() for name in [
-    "cb_mae_trainval", "cb_rmse_trainval", "cb_mae_test", "cb_rmse_test"
-])
-
-if cb_vars_exist:
+# -------------------------
+# CatBoost metrics
+# Requires you to set these in CatBoost eval:
+#   cb_test_full, cb_test_clipped
+#   cb_trainval_full, cb_trainval_clipped
+#   cb_train_full/cb_train_clipped, cb_val_full/cb_val_clipped
+# -------------------------
+if all(k in globals() for k in ["cb_test_full", "cb_test_clipped",
+                                "cb_trainval_full", "cb_trainval_clipped"]):
     metrics["catboost"] = {
-        "trainval_mae": float(cb_mae_trainval),
-        "trainval_rmse": float(cb_rmse_trainval),
-        "test_mae": float(cb_mae_test),
-        "test_rmse": float(cb_rmse_test),
-        "best_iteration": int(final_cb.get_best_iteration()) if ("final_cb" in globals() and final_cb is not None) else None,
-        "run_dir": str(RUN_DIR) if "RUN_DIR" in globals() else None,
+        "trainval": _split_payload("cb_trainval_full", "cb_trainval_clipped"),
+        "test": _split_payload("cb_test_full", "cb_test_clipped"),
+        "best_iteration": (
+            int(final_cb.get_best_iteration())
+            if ("final_cb" in globals() and final_cb is not None)
+            else None
+        ),
+        "run_dir": _str_or_none(globals().get("RUN_DIR", None)),
     }
 
-    # Optional: include CV-best val metrics if you computed them earlier
+    # CV-best val metrics
     if all(name in globals() for name in ["mae_cv", "rmse_cv"]):
-        metrics["catboost"]["val_mae_cvbest"] = float(mae_cv)
-        metrics["catboost"]["val_rmse_cvbest"] = float(rmse_cv)
+        metrics["catboost"]["val_cvbest"] = {
+            "mae": float(mae_cv),
+            "rmse": float(rmse_cv),
+        }
 
-    # Optional: include clipped if you computed these earlier
-    if "cb_test_clipped" in globals() and cb_test_clipped is not None:
-        metrics["catboost"]["test_clipped"] = cb_test_clipped
-    if "cb_trainval_clipped" in globals() and cb_trainval_clipped is not None:
-        metrics["catboost"]["trainval_clipped"] = cb_trainval_clipped
+    # Store explicit train/val split metrics if you created them
+    if all(k in globals() for k in ["cb_train_full", "cb_train_clipped"]):
+        metrics["catboost"]["train"] = _split_payload("cb_train_full", "cb_train_clipped")
+
+    if all(k in globals() for k in ["cb_val_full", "cb_val_clipped"]):
+        metrics["catboost"]["val"] = _split_payload("cb_val_full", "cb_val_clipped")
 
 else:
-    print("ℹ️ Skipping CatBoost metrics write (need cb_mae_trainval/cb_rmse_trainval/cb_mae_test/cb_rmse_test).")
+    print("ℹ️ Skipping CatBoost metrics write (need cb_*_full and cb_*_clipped).")
 
-# ---------- Keras metrics (record-only) ----------
-# Your Keras evaluation cell already sets:
-#   keras_mae_test, keras_rmse_test, keras_mae_trainval, keras_rmse_trainval
-#   keras_test_clipped, keras_trainval_clipped
-keras_vars_exist = all(name in globals() for name in [
-    "keras_mae_trainval", "keras_rmse_trainval", "keras_mae_test", "keras_rmse_test"
-])
-
-if keras_vars_exist:
+# -------------------------
+# Keras metrics
+# Requires you to set these in Keras eval:
+#   keras_test_full, keras_test_clipped
+#   keras_trainval_full, keras_trainval_clipped
+# -------------------------
+if all(k in globals() for k in ["keras_test_full", "keras_test_clipped",
+                                "keras_trainval_full", "keras_trainval_clipped"]):
     metrics["keras"] = {
-        "trainval_mae": float(keras_mae_trainval),
-        "trainval_rmse": float(keras_rmse_trainval),
-        "test_mae": float(keras_mae_test),
-        "test_rmse": float(keras_rmse_test),
-        "run_dir": str(KERAS_RUN_DIR) if "KERAS_RUN_DIR" in globals() else None,
+        "trainval": _split_payload("keras_trainval_full", "keras_trainval_clipped"),
+        "test": _split_payload("keras_test_full", "keras_test_clipped"),
+        "run_dir": _str_or_none(globals().get("KERAS_RUN_DIR", None)),
     }
-
-    # Optional: include clipped metrics if present
-    if "keras_test_clipped" in globals() and keras_test_clipped is not None:
-        metrics["keras"]["test_clipped"] = keras_test_clipped
-    if "keras_trainval_clipped" in globals() and keras_trainval_clipped is not None:
-        metrics["keras"]["trainval_clipped"] = keras_trainval_clipped
-
 else:
-    print("ℹ️ Skipping Keras metrics write (need keras_mae_trainval/keras_rmse_trainval/keras_mae_test/keras_rmse_test).")
+    print("ℹ️ Skipping Keras metrics write (need keras_*_full and keras_*_clipped).")
 
-# ---------- Write files ----------
+# -------------------------
+# Write files
+# -------------------------
 metrics_ts = datetime.now().strftime("%Y%m%d_%H%M%S")
 METRICS_VERSIONED_PATH = METRICS_DIR / f"metrics_{metrics_ts}.json"
 
@@ -2118,24 +2748,24 @@ atomic_write_json(METRICS_VERSIONED_PATH, metrics)
 print("🧾 Wrote versioned metrics:", METRICS_VERSIONED_PATH)
 
 # Run-specific metrics (CatBoost run dir)
-if "RUN_DIR" in globals() and RUN_DIR is not None:
-    atomic_write_json(RUN_DIR / "metrics.json", metrics)
-    print("🧾 Wrote run metrics:", RUN_DIR / "metrics.json")
+if ("RUN_DIR" in globals()) and (globals().get("RUN_DIR", None) is not None):
+    atomic_write_json(globals()["RUN_DIR"] / "metrics.json", metrics)
+    print("🧾 Wrote run metrics:", globals()["RUN_DIR"] / "metrics.json")
 
 # Run-specific metrics (Keras run dir)
-if "KERAS_RUN_DIR" in globals() and KERAS_RUN_DIR is not None:
+if ("KERAS_RUN_DIR" in globals()) and (globals().get("KERAS_RUN_DIR", None) is not None):
     keras_only = {
         "_meta": metrics["_meta"],
         "keras": metrics.get("keras", None),
     }
-    atomic_write_json(KERAS_RUN_DIR / "keras_metrics.json", keras_only)
-    print("🧾 Wrote Keras-only metrics:", KERAS_RUN_DIR / "keras_metrics.json")
+    atomic_write_json(globals()["KERAS_RUN_DIR"] / "keras_metrics.json", keras_only)
+    print("🧾 Wrote Keras-only metrics:", globals()["KERAS_RUN_DIR"] / "keras_metrics.json")
 
 ```
 
-### Model Comparison Graphs
+## Model Comparison Graphs
 
-#### Plotting Functions for Models
+### Plotting Functions for Models
 ```{python}
 # =========================
 # Plot Function 1
@@ -2302,7 +2932,7 @@ def plot_pred_vs_pred(
     plt.show()
 ```
 
-#### Model Graph Section
+### Model Graph Section
 ```{python}
 # =========================
 # Model Comparison Plots -- using test set
@@ -2311,7 +2941,6 @@ def plot_pred_vs_pred(
 if ("X_test" not in globals()) or ("y_test" not in globals()):
     print("⚠️ X_test/y_test not found — cannot plot comparisons.")
 else:
-    # True dollars for the test set
     y_true_test = np.expm1(y_test)
 
     # Choose feature for residual-vs-feature
@@ -2319,7 +2948,6 @@ else:
 
     # ----------------------------------------------------------
     # Collect predictions from any models that exist
-    # (Add Keras later)
     # ----------------------------------------------------------
     preds = {}
 
@@ -2333,14 +2961,6 @@ else:
     else:
         print("ℹ️ CatBoost not available — skipping CatBoost plots.")
 
-    # [FUTURE] Keras — just add later:
-    # if ("keras_model" in globals()) and (keras_model is not None):
-    #     y_pred_log_keras = keras_model.predict(X_test_keras).ravel()  # log1p predictions
-    #     preds["Keras"] = np.expm1(y_pred_log_keras)
-
-    # ----------------------------
-    # Keras (add this block)
-    # ----------------------------
     if ("model" in globals()) and (model is not None) and ("test_inputs" in globals()):
         y_pred_log_keras = model.predict(test_inputs, batch_size=4096, verbose=0).ravel()  # log1p preds
         preds["Keras"] = np.expm1(y_pred_log_keras)  # dollars
@@ -2408,12 +3028,4 @@ else:
                     )
         else:
             print("ℹ️ Only one model available — skipping pred-vs-pred comparison plots.")
-```
-
-```{python}
-
-```
-
-```{python}
-
 ```

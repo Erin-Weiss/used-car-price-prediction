@@ -78,6 +78,7 @@ graphviz==0.21
     # via catboost
 grpcio==1.78.0
     # via
+    #   keras-tuner
     #   tensorboard
     #   tensorflow
 h11==0.16.0
@@ -190,9 +191,15 @@ kagglesdk==0.1.15
     #   kaggle
     #   kagglehub
 keras==3.13.2
-    # via tensorflow
+    # via
+    #   keras-tuner
+    #   tensorflow
+keras-tuner==1.4.8
+    # via -r requirements.in
 kiwisolver==1.4.9
     # via matplotlib
+kt-legacy==1.0.5
+    # via keras-tuner
 lark==1.3.1
     # via rfc3987-syntax
 libclang==18.1.1
@@ -278,6 +285,7 @@ packaging==26.0
     #   kaggle
     #   kagglehub
     #   keras
+    #   keras-tuner
     #   matplotlib
     #   nbconvert
     #   plotly
@@ -312,6 +320,7 @@ protobuf==4.25.8
     # via
     #   kaggle
     #   kagglesdk
+    #   keras-tuner
     #   tensorboard
     #   tensorflow
 psutil==7.2.2
@@ -367,6 +376,7 @@ requests==2.32.5
     #   kaggle
     #   kagglehub
     #   kagglesdk
+    #   keras-tuner
     #   tensorflow
 rfc3339-validator==0.1.4
     # via
