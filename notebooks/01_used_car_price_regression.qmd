@@ -173,7 +173,7 @@ import zipfile
 # ===============================
 # Training control flags
 # ===============================
-TRAIN_MODE = "smoke"   # "smoke" | "full" | "skip"
+TRAIN_MODE = "full"   # "smoke" | "full" | "skip"
 
 RETRAIN_RIDGE = False
 RETRAIN_CATBOOST = False
@@ -1988,6 +1988,7 @@ KERAS_CFG = {
 
     "pred_batch": 4096,
     "lr": 1e-3,
+    # "lr": 3e-4,
 
     # optional smoke subsample (stable and simple)
     "smoke_subsample": False,
@@ -2206,6 +2207,8 @@ def build_baseline_model():
 
     model = keras.Model(inputs={"numeric": numeric_in, **cat_in}, outputs=out, name="tabular_nn_baseline")
 
+# , weight_decay=1e-4,clipnorm=1.0
+
     model.compile(
         optimizer=keras.optimizers.Adam(learning_rate=KERAS_CFG["lr"]),
         loss="mse",
@@ -2234,11 +2237,18 @@ def _touches_latest() -> bool:
 def make_callbacks_min(train_mode: str):
     ES_PAT = KERAS_CFG["es_patience_smoke"] if train_mode == "smoke" else KERAS_CFG["es_patience_full"]
     return [
+        # keras.callbacks.ModelCheckpoint(
+        #     filepath=best_weights_path,
+        #     monitor="val_loss",
+        #     save_best_only=True,
+        #     save_weights_only=True,
+        #     verbose=0,
+        # ),
         keras.callbacks.EarlyStopping(
             monitor="val_loss",
             patience=ES_PAT,
             restore_best_weights=True,
-        )
+        ),
     ]
 
 # 1) SKIP: never train; load latest if it exists
@@ -2379,7 +2389,8 @@ else:
 
     # ----------------------------
     # TEST metrics (full + clipped)
-    # ----------------------------
+    # ---------------------------- 
+
     true_test = np.expm1(y_test_nn.astype("float64"))
     pred_test = predict_dollars(test_inputs_tf)
 
@@ -2399,6 +2410,12 @@ else:
 
     keras_trainval_m = metrics_full_and_clipped(true_trainval, pred_trainval, q_low=0.01, q_high=0.99)
     display(metrics_to_df(keras_trainval_m, "Keras (Train+Val)"))
+
+    # ----------------------------
+    # Quick Check
+    # ----------------------------
+
+    print(true_trainval.shape, pred_trainval.shape, true_test.shape, pred_test.shape)
 
     # Globals for your metrics
     keras_test_full = keras_test_m["full"]
@@ -2949,12 +2966,6 @@ else:
         preds["CatBoost"] = np.expm1(final_cb.predict(X_test))
     else:
         print("ℹ️ CatBoost not available — skipping CatBoost plots.")
-
-    # if ("model" in globals()) and (model is not None) and ("test_inputs" in globals()):
-    #     y_pred_log_keras = model.predict(test_inputs, batch_size=4096, verbose=0).ravel()  # log1p preds
-    #     preds["Keras"] = np.expm1(y_pred_log_keras)  # dollars
-    # else:
-    #     print("ℹ️ Keras model/test_inputs not available — skipping Keras plots.")
 
     if ("model" in globals()) and (model is not None) and (("test_inputs_tf" in globals()) or ("test_inputs" in globals())):
         # Prefer tf.data pipeline if available (static shapes + correct string ranks)
