@@ -2208,10 +2208,11 @@ def build_baseline_model():
     model = keras.Model(inputs={"numeric": numeric_in, **cat_in}, outputs=out, name="tabular_nn_baseline")
 
 # , weight_decay=1e-4,clipnorm=1.0
+# loss="mse",
 
     model.compile(
         optimizer=keras.optimizers.Adam(learning_rate=KERAS_CFG["lr"]),
-        loss="mse",
+        loss=keras.losses.Huber(delta=2.0),
         metrics=[keras.metrics.RootMeanSquaredError(name="rmse_log")],
     )
     return model
