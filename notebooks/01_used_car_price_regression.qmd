@@ -1970,68 +1970,53 @@ np.random.seed(SEED)
 
 ```{python}
 # ----------------------------
-# Step -1: Hyperparameters in one place (tune here)
+# Step -1: Simple Keras config (start stable)
 # ----------------------------
-KERAS_TUNE = {
-    # --- training modes ---
+KERAS_CFG = {
     "batch_full": 2048,
-    "epochs_full": 120,     # EarlyStopping determines actual stop
+    "epochs_full": 80,          # EarlyStopping will stop earlier
+    "batch_smoke": 512,
+    "epochs_smoke": 3,
 
-    # --- callbacks ---
-    "es_patience_full": 10,
+    "es_patience_full": 8,
     "es_patience_smoke": 3,
+
     "rlrop_patience_full": 3,
     "rlrop_patience_smoke": 1,
     "rlrop_factor": 0.5,
     "min_lr": 1e-6,
 
-    # --- evaluation/predict ---
     "pred_batch": 4096,
+    "lr": 1e-3,
 
-    # --- tuner (coarse) Hyperband ---
-    "hb_max_epochs_full": 60,
-    "hb_max_epochs_smoke": 12,
-    "hb_factor": 3,
-    "hb_executions_per_trial": 1,
-
-    # --- tuner (fine) Bayesian ---
-    "bayes_epochs_full": 60,
-    "bayes_epochs_smoke": 8,
-    "bayes_max_trials_full": 25,
-    "bayes_max_trials_smoke": 10,
-    "bayes_executions_per_trial": 1,
-
-    # --- smoke speed controls ---
-    "batch_smoke": 512,
-    "epochs_smoke": 10,
-    "smoke_subsample": True,
+    # optional smoke subsample (stable and simple)
+    "smoke_subsample": False,
     "smoke_train_n": 15000,
     "smoke_val_n": 5000,
-
-    # --- base defaults if you run WITHOUT tuner (fallback) ---
-    "fallback_learning_rate": 3e-4,
-    "fallback_loss": "huber",        # "mse" | "mae" | "huber"
-    "fallback_huber_delta": 0.5,
-    "fallback_activation": "silu",   # "silu" | "gelu"
-    "fallback_use_residuals": True,
 }
 ```
 
 ```{python}
 # ----------------------------
-# Step 1: Define feature columns 
+# Step 1: Define feature columns (base)
 # ----------------------------
+NUM_COLS_BASE = [
+    "mileage", "mpg_avg", "price_drop", "seller_rating", "driver_rating",
+    "driver_reviews_num", "accidents_or_damage", "one_owner", "personal_use_only",
+    "age", "mileage_per_year", "engine_liters", "engine_cylinders",
+    "engine_turbo", "engine_hybrid", "transmission_gears", "transmission_gears_missing",
+    "is_luxury_brand", "luxury_age_interaction",
+]
+CAT_COLS_BASE = [
+    "manufacturer", "model", "drivetrain", "fuel_type", "engine_layout",
+    "transmission_clean", "exterior_color_base", "interior_color_base",
+]
 
-# Keep original globals untouched
-NUM_COLS_BASE = list(num_cols)
-CAT_COLS_BASE = list(cat_cols)
+num_cols_nn = [c for c in NUM_COLS_BASE if c in X_train.columns]
+cat_cols_nn = [c for c in CAT_COLS_BASE if c in X_train.columns]
 
-# Keras-specific copies 
-num_cols_nn = list(NUM_COLS_BASE)
-cat_cols_nn = list(CAT_COLS_BASE)
-
-print("Numeric cols (base):", len(NUM_COLS_BASE))
-print("Categorical cols (base):", len(CAT_COLS_BASE))
+print("Numeric cols:", len(num_cols_nn))
+print("Categorical cols:", len(cat_cols_nn))
 
 # ----------------------------
 # Step 2: Prepare train/val/test (NN copies)
@@ -2040,7 +2025,7 @@ X_train_nn = X_train.copy()
 X_val_nn   = X_val.copy()
 X_test_nn  = X_test.copy()
 
-# Add missing indicators
+# Add missing indicators (optional but helpful)
 missing_indicator_cols = []
 for col in ["engine_liters", "engine_cylinders"]:
     if col in X_train_nn.columns:
@@ -2049,37 +2034,28 @@ for col in ["engine_liters", "engine_cylinders"]:
             df_[miss] = df_[col].isna().astype("int64")
         missing_indicator_cols.append(miss)
 
-# Update ONLY the NN numeric list
 for miss in missing_indicator_cols:
     if miss not in num_cols_nn:
         num_cols_nn.append(miss)
 
-# numeric impute using TRAIN medians
+# Numeric impute using TRAIN medians only
 train_medians = X_train_nn[num_cols_nn].median(numeric_only=True)
-X_train_nn[num_cols_nn] = X_train_nn[num_cols_nn].fillna(train_medians)
-X_val_nn[num_cols_nn]   = X_val_nn[num_cols_nn].fillna(train_medians)
-X_test_nn[num_cols_nn]  = X_test_nn[num_cols_nn].fillna(train_medians)
+for df_ in (X_train_nn, X_val_nn, X_test_nn):
+    df_[num_cols_nn] = df_[num_cols_nn].fillna(train_medians)
 
-# categorical fill/cast
+# Categorical fill/cast
 for c in cat_cols_nn:
-    X_train_nn[c] = X_train_nn[c].fillna("unknown").astype(str)
-    X_val_nn[c]   = X_val_nn[c].fillna("unknown").astype(str)
-    X_test_nn[c]  = X_test_nn[c].fillna("unknown").astype(str)
+    for df_ in (X_train_nn, X_val_nn, X_test_nn):
+        df_[c] = df_[c].fillna("unknown").astype(str)
 
-# targets (already log1p)
-y_train_nn = y_train.to_numpy().astype("float32").reshape(-1, 1)
-y_val_nn   = y_val.to_numpy().astype("float32").reshape(-1, 1)
-y_test_nn  = y_test.to_numpy().astype("float32").reshape(-1, 1)
+# Targets (already log1p)
+# IMPORTANT: keep as (N,) for simplicity
+y_train_nn = y_train.to_numpy().astype("float32")
+y_val_nn   = y_val.to_numpy().astype("float32")
+y_test_nn  = y_test.to_numpy().astype("float32")
 
 print("Rows:", {"train": len(X_train_nn), "val": len(X_val_nn), "test": len(X_test_nn)})
 print("NN numeric cols:", len(num_cols_nn), "| NN cat cols:", len(cat_cols_nn))
-
-# DEBUG
-
-# Compute output bias initializer from training data mean
-# Must be defined before build_model_from_hp is called
-LOG1P_MEAN = float(y_train_nn.mean())  # y_train_nn is already log1p-transformed
-print(f"LOG1P_MEAN (output bias init): {LOG1P_MEAN:.4f}")
 ```
 
 #### Keras Model Preprossesing 
@@ -2090,76 +2066,59 @@ print(f"LOG1P_MEAN (output bias init): {LOG1P_MEAN:.4f}")
 # - StringLookup + Embedding per categorical feature
 # ----------------------------
 
-latest_path = KERAS_LATEST_PATH if "KERAS_LATEST_PATH" in globals() else (MODEL_DIR / "keras" / "keras_model.keras")
+def suggest_embed_dim(vocab_size: int) -> int:
+    dim = int(np.ceil(np.log2(vocab_size + 1) * 2))
+    return int(np.clip(dim, 8, 50))
+
+# Decide paths
+KERAS_DIR = MODEL_DIR / "keras"
+KERAS_DIR.mkdir(parents=True, exist_ok=True)
+KERAS_RUNS_DIR = KERAS_DIR / "runs"
+KERAS_RUNS_DIR.mkdir(parents=True, exist_ok=True)
+
+latest_path = KERAS_DIR / "keras_model.keras"  # "latest" pointer
 
 WILL_TRAIN_KERAS = (
     (TRAIN_MODE == "smoke") or
     (TRAIN_MODE == "full" and (RETRAIN_KERAS or (not latest_path.exists())))
 )
 
-print("Keras WILL_TRAIN_KERAS =", WILL_TRAIN_KERAS, "| latest exists =", latest_path.exists())
+print("WILL_TRAIN_KERAS =", WILL_TRAIN_KERAS, "| latest exists =", latest_path.exists())
 
-num_norm = None
-lookups = None
-embed_dims = None
-vocab_sizes = None
+NUM_NORM_WEIGHTS = None
+LOOKUP_VOCABS = None
+EMBED_DIMS = None
 
-def suggest_embed_dim(vocab_size: int) -> int:
-    dim = int(np.ceil(np.log2(vocab_size + 1) * 2))
-    return int(np.clip(dim, 8, 50))
-
-if not WILL_TRAIN_KERAS:
-    print("⏭️ Skipping adapt/build preprocessing layers (will load existing Keras model later).")
-else:
+if WILL_TRAIN_KERAS:
+    # Numeric normalization
     num_norm = layers.Normalization(name="num_norm")
     num_norm.adapt(X_train_nn[num_cols_nn].astype("float32").to_numpy())
+    NUM_NORM_WEIGHTS = num_norm.get_weights()
 
-    lookups = {}
-    embed_dims = {}
+    # Categoricals
+    LOOKUP_VOCABS = {}
+    EMBED_DIMS = {}
     vocab_sizes = {}
 
     for c in cat_cols_nn:
-        lookup = layers.StringLookup(
+        lk = layers.StringLookup(
             output_mode="int",
             mask_token=None,
             num_oov_indices=1,
-            name=f"{c}_lookup"
+            name=f"{c}_lookup",
         )
-        lookup.adapt(X_train_nn[c].astype(str).to_numpy())
-
-        vocab_size = int(lookup.vocabulary_size())  # includes OOV bucket
-        dim = suggest_embed_dim(vocab_size)
-
-        lookups[c] = lookup
-        vocab_sizes[c] = vocab_size
-        embed_dims[c] = int(dim)
+        lk.adapt(X_train_nn[c].to_numpy(dtype=str))
+        vocab = lk.get_vocabulary()
+        LOOKUP_VOCABS[c] = vocab
+        vs = len(vocab)
+        vocab_sizes[c] = vs
+        EMBED_DIMS[c] = suggest_embed_dim(vs)
 
     print("Embedding plan:")
     for c in cat_cols_nn:
-        print(f"  {c:20s} vocab={vocab_sizes[c]:6d}  emb_dim={embed_dims[c]:2d}")
-
-    # ----------------------------
-    # Freeze preprocessing state for tuner stability
-    # (so each trial gets fresh layer instances)
-    # ----------------------------
-    NUM_NORM_WEIGHTS = num_norm.get_weights()
-
-    LOOKUP_VOCABS = {}
-    for c in cat_cols_nn:
-        lk = lookups[c]
-        try:
-            vocab = lk.get_vocabulary(include_special_tokens=True)
-        except TypeError:
-            vocab = lk.get_vocabulary()
-        LOOKUP_VOCABS[c] = vocab
-
-    # Recompute vocab_sizes from frozen vocabs
-    FROZEN_VOCAB_SIZES = {c: len(LOOKUP_VOCABS[c]) for c in cat_cols_nn}
-
-    print("✅ Frozen preprocessing:")
-    print("  num_norm weights:", [w.shape for w in NUM_NORM_WEIGHTS])
-    print("  lookup vocab sizes:", {c: FROZEN_VOCAB_SIZES[c] for c in cat_cols_nn})
-
+        print(f"  {c:20s} vocab={vocab_sizes[c]:6d}  emb_dim={EMBED_DIMS[c]:2d}")
+else:
+    print("⏭️ Skipping adapt — will load existing model.")
 ```
 
 #### Keras Model Building 
@@ -2167,308 +2126,92 @@ else:
 # ----------------------------
 # Step 4: Convert pandas -> Keras-friendly input dicts
 # ----------------------------
-# def to_input_dict(Xdf: pd.DataFrame):
-#     d = {"numeric": Xdf[num_cols_nn].to_numpy(dtype=np.float32, copy=True)}
-#     for c in cat_cols_nn:
-#         d[c] = Xdf[c].astype(str).to_numpy(copy=True).reshape(-1, 1)
-#     return d
-
-# train_inputs = to_input_dict(X_train_nn)
-# val_inputs   = to_input_dict(X_val_nn)
-# test_inputs  = to_input_dict(X_test_nn)
-
-# ----------------------------
-# Helper: pandas -> Keras input dict with SAFE dtypes
-# (avoids "Invalid dtype: object")
-# ----------------------------
-def to_input_dict(Xdf: pd.DataFrame) -> dict:
-    out = {}
-    out["numeric"] = Xdf[num_cols_nn].to_numpy(dtype=np.float32, copy=True)
-
+def to_input_dict_np(Xdf: pd.DataFrame) -> dict:
+    """
+    numeric: (N, D) float32
+    categoricals: (N,) python strings
+    """
+    out = {"numeric": Xdf[num_cols_nn].to_numpy(dtype=np.float32, copy=True)}
     for c in cat_cols_nn:
-        # Keep as Python strings (object) and let to_tf_inputs convert cleanly to tf.string
-        out[c] = Xdf[c].fillna("unknown").astype(str).to_numpy(copy=False)
-
+        out[c] = Xdf[c].astype(str).to_numpy(copy=False)  # (N,)
     return out
 
-# Build inputs (NOW safe)
-train_inputs = to_input_dict(X_train_nn)
-val_inputs   = to_input_dict(X_val_nn)
-test_inputs  = to_input_dict(X_test_nn)
-
-# ----------------------------
-# Convert numpy inputs -> TF tensors with supported dtypes
-# (fixes Keras 3 / optree "Invalid dtype: str###")
-# ----------------------------
-def to_tf_inputs(inputs_np: dict) -> dict:
-    out = {}
-    for k, v in inputs_np.items():
-        if k == "numeric":
-            out[k] = tf.convert_to_tensor(v, dtype=tf.float32)
-        else:
-            # Ensure a 1D tensor of tf.string
-            # (avoid numpy unicode dtype like <U544 / "str544")
-            out[k] = tf.convert_to_tensor(v.tolist(), dtype=tf.string)
+def to_input_dict_tf(inputs_np: dict) -> dict:
+    """
+    numeric -> tf.float32 (N, D)
+    cats -> tf.string (N,)  IMPORTANT: rank-1
+    """
+    out = {"numeric": tf.convert_to_tensor(inputs_np["numeric"], dtype=tf.float32)}
+    for c in cat_cols_nn:
+        out[c] = tf.convert_to_tensor(inputs_np[c].tolist(), dtype=tf.string)  # (N,)
     return out
 
-# Build TF versions (use THESE for ds + predict)
-train_inputs_tf = to_tf_inputs(train_inputs)
-val_inputs_tf   = to_tf_inputs(val_inputs)
-test_inputs_tf  = to_tf_inputs(test_inputs)
-
+train_inputs_tf = to_input_dict_tf(to_input_dict_np(X_train_nn))
+val_inputs_tf   = to_input_dict_tf(to_input_dict_np(X_val_nn))
+test_inputs_tf  = to_input_dict_tf(to_input_dict_np(X_test_nn))
 
 # ----------------------------
-# Step 5: Model builder (HP-aware) + Tuner integration
-#   - Build fresh preprocessing layers per trial to avoid KerasTuner state reuse issues.
-#   - Uses frozen NUM_NORM_WEIGHTS + LOOKUP_VOCABS.
+# Step 5: Model builder 
 # ----------------------------
-
-def _activation_layer(x, act_name: str):
-    if act_name == "gelu":
-        return layers.Activation("gelu")(x)
-    return layers.Activation(tf.keras.activations.silu)(x)  # default silu
-
-
-def build_model_from_hp(hp):
-    """
-    KerasTuner model builder.
-    Predicts log1p(price). Train/validate in log space; evaluate in dollars later.
-    Uses a bounded tanh output head to prevent expm1 overflow.
-
-    Expects these to exist (from Step 3):
-      - NUM_NORM_WEIGHTS
-      - LOOKUP_VOCABS
-      - vocab_sizes (or recompute from LOOKUP_VOCABS)
-      - embed_dims
-    """
-
-    # ----------------------------
-    # Hyperparameters
-    # ----------------------------
-    act = hp.Choice("activation", ["silu", "gelu"], default=KERAS_TUNE["fallback_activation"])
-
-    lr = hp.Float(
-        "learning_rate", min_value=1e-4, max_value=3e-3, sampling="log",
-        default=KERAS_TUNE["fallback_learning_rate"]
-    )
-
-    use_res = hp.Boolean("use_residuals", default=KERAS_TUNE["fallback_use_residuals"])
-
-    l2 = hp.Choice("l2", values=[0.0, 1e-7, 1e-6, 1e-5], default=1e-6)
-    emb_l2 = hp.Choice("embedding_l2", values=[0.0, 1e-7, 1e-6, 1e-5], default=1e-6)
-
-    d1 = hp.Int("dense1", min_value=256, max_value=1024, step=256, default=512)
-    d2 = hp.Int("dense2", min_value=128, max_value=512, step=128, default=256)
-    d3 = hp.Int("dense3", min_value=64,  max_value=256, step=64,  default=128)
-
-    drop1 = hp.Float("drop1", min_value=0.1, max_value=0.4, step=0.1, default=0.3)
-    drop2 = hp.Float("drop2", min_value=0.1, max_value=0.4, step=0.1, default=0.25)
-    drop3 = hp.Float("drop3", min_value=0.1, max_value=0.3, step=0.1, default=0.2)
-
-    # loss_name = hp.Choice("loss", ["mse", "mae", "huber"], default=KERAS_TUNE["fallback_loss"])
-    loss_name = hp.Choice("loss", ["mse"], default="mse")
-    huber_delta = hp.Float(
-        "huber_delta", min_value=0.5, max_value=1.5, step=0.2,
-        default=KERAS_TUNE["fallback_huber_delta"]
-    )
-
-    clipnorm = hp.Choice("clipnorm", values=[0.5, 1.0, 1.5, 2.0], default=1.0)
-
-    # --------------------------------------------------
-    # SMOKE MODE SAFETY OVERRIDES
-    # (do NOT change HP search space — override values)
-    # --------------------------------------------------
-    if TRAIN_MODE == "smoke":
-        # Disable regularization pressure
-        drop1 = min(drop1, 0.2)
-        drop2 = min(drop2, 0.2)
-        drop3 = min(drop3, 0.2)
-        l2 = 0.0
-        emb_l2 = 0.0
-
-        # Make loss less median-seeking
-        if loss_name == "huber":
-            huber_delta = max(huber_delta, 1.0)
-
-        # Encourage signal propagation
-        use_res = True
-
-    # ----------------------------
-    # Output bounds for log1p(price)
-    # ----------------------------
-    # LOG_CENTER = 10.5
-    # LOG_SCALE  = 6.0
-
-    # log1p($500) ≈ 6.2,  log1p($500k) ≈ 13.1
-    LOG_CENTER = 9.65   # midpoint of (6.2, 13.1)
-    LOG_SCALE  = 3.45   # half-range of (6.2, 13.1)
-
-    # ----------------------------
+def build_baseline_model():
     # Inputs
-    # ----------------------------
     numeric_in = keras.Input(shape=(len(num_cols_nn),), name="numeric", dtype=tf.float32)
-    cat_inputs_local = {c: keras.Input(shape=(), name=c, dtype=tf.string) for c in cat_cols_nn}
+    cat_in = {c: keras.Input(shape=(), name=c, dtype=tf.string) for c in cat_cols_nn}
 
-    # ----------------------------
-    # Fresh preprocessing layers per trial
-    # ----------------------------
-    # Fresh preprocessing layers per trial
+    # Fresh preprocessing layers (re-built from frozen state)
     num_norm_local = layers.Normalization(name="num_norm")
-
-    # Build before set_weights (otherwise expects 0 weights)
     num_norm_local.build((None, len(num_cols_nn)))
-
-    # Now it can accept the adapted weights
     num_norm_local.set_weights(NUM_NORM_WEIGHTS)
 
-    lookups_local = {}
-    vocab_sizes_local = {}
+    x_num = num_norm_local(numeric_in)
+
+    # Cat lookups + embeddings (each embedding output is (N, emb_dim))
+    emb_list = []
     for c in cat_cols_nn:
         lk = layers.StringLookup(
             output_mode="int",
             mask_token=None,
             num_oov_indices=1,
-            name=f"{c}_lookup"
+            name=f"{c}_lookup",
         )
-        # Use frozen vocab so every trial sees identical mapping
         lk.set_vocabulary(LOOKUP_VOCABS[c])
-        lookups_local[c] = lk
-        vocab_sizes_local[c] = int(lk.vocabulary_size())
 
-    # ----------------------------
-    # Numeric path
-    # ----------------------------
-    x_num = num_norm_local(numeric_in)
-
-    # ----------------------------
-    # Categorical embedding paths
-    # ----------------------------
-    emb_list = []
-    emb_reg = keras.regularizers.l2(emb_l2) if (emb_l2 and emb_l2 > 0) else None
-
-    # for c in cat_cols_nn:
-    #     xi = lookups_local[c](cat_inputs_local[c])
-    #     xi = layers.Embedding(
-    #         input_dim=vocab_sizes_local[c],
-    #         output_dim=embed_dims[c],
-    #         embeddings_regularizer=emb_reg,
-    #         name=f"{c}_emb"
-    #     )(xi)
-    #     xi = layers.Flatten()(xi)
-    #     emb_list.append(xi)
-
-    for c in cat_cols_nn:
-        xi = lookups_local[c](cat_inputs_local[c])  # (batch,)
-        xi = layers.Embedding(
-            input_dim=vocab_sizes_local[c],
-            output_dim=embed_dims[c],
-            embeddings_regularizer=emb_reg,
-            name=f"{c}_emb"
-        )(xi)  # (batch, emb_dim)
-        emb_list.append(xi)
+        ids = lk(cat_in[c])  # (N,)
+        emb = layers.Embedding(
+            input_dim=lk.vocabulary_size(),
+            output_dim=EMBED_DIMS[c],
+            name=f"{c}_emb",
+        )(ids)  # (N, emb_dim)
+        emb_list.append(emb)
 
     x = layers.Concatenate(name="concat")([x_num] + emb_list)
 
-    reg = keras.regularizers.l2(l2) if (l2 and l2 > 0) else None
+    # Dense stack (same spirit as your working model)
+    x = layers.Dense(256, kernel_initializer="he_normal")(x)
+    x = layers.BatchNormalization()(x)
+    x = layers.Activation(tf.keras.activations.silu)(x)
+    x = layers.Dropout(0.30)(x)
 
-    # ----------------------------
-    # Dense blocks
-    # ----------------------------
-    # Block 1 (d1)
-    y = layers.Dense(d1, kernel_initializer="he_normal", kernel_regularizer=reg)(x)
-    y = layers.BatchNormalization(momentum=0.9)(y)
-    y = _activation_layer(y, act)
-    y = layers.Dropout(drop1)(y)
-    x = y
+    x = layers.Dense(128, kernel_initializer="he_normal")(x)
+    x = layers.BatchNormalization()(x)
+    x = layers.Activation(tf.keras.activations.silu)(x)
+    x = layers.Dropout(0.25)(x)
 
-    # Block 2 (d2)
-    y = layers.Dense(d2, kernel_initializer="he_normal", kernel_regularizer=reg)(x)
-    y = layers.BatchNormalization(momentum=0.9)(y)
-    y = _activation_layer(y, act)
-    y = layers.Dropout(drop2)(y)
-    if use_res:
-        skip = x
-        if int(skip.shape[-1]) != d2:
-            skip = layers.Dense(d2, kernel_regularizer=reg)(skip)
-        x = layers.Add()([y, skip])
-    else:
-        x = y
+    x = layers.Dense(64, kernel_initializer="he_normal")(x)
+    x = layers.BatchNormalization()(x)
+    x = layers.Activation(tf.keras.activations.silu)(x)
+    x = layers.Dropout(0.20)(x)
 
-    # Block 3 (d3)
-    y = layers.Dense(d3, kernel_initializer="he_normal", kernel_regularizer=reg)(x)
-    y = layers.BatchNormalization(momentum=0.9)(y)
-    y = _activation_layer(y, act)
-    y = layers.Dropout(drop3)(y)
-    if use_res:
-        skip = x
-        if int(skip.shape[-1]) != d3:
-            skip = layers.Dense(d3, kernel_regularizer=reg)(skip)
-        x = layers.Add()([y, skip])
-    else:
-        x = y
+    out = layers.Dense(1, name="pred_log1p")(x)
 
-    # ----------------------------
-    # Bounded output head (log1p)
-    # ----------------------------
-    z = layers.Dense(1, name="z_logit")(x)
-    out = layers.Lambda(lambda t: LOG_CENTER + LOG_SCALE * tf.tanh(t), name="pred_log1p")(z)
+    model = keras.Model(inputs={"numeric": numeric_in, **cat_in}, outputs=out, name="tabular_nn_baseline")
 
-    # REPLACE with this:
-    # Output layer — NO regularizer, NO activity regularizer
-    # out = layers.Dense(1, name="pred_log1p", 
-    #                 kernel_initializer="glorot_uniform",
-    #                 bias_initializer=tf.keras.initializers.Constant(LOG1P_MEAN),
-    #                 kernel_regularizer=None,
-    #                 kernel_constraint=MinMaxNorm(min_value=0.01, max_value=10.0, rate=1.0),
-    #                 activation="softplus",)(x)
-
-
-    # Raw linear output
-    # z = layers.Dense(
-    #     1,
-    #     name="z_out",
-    #     kernel_initializer="glorot_uniform",
-    #     bias_initializer=tf.keras.initializers.Constant(LOG1P_MEAN),
-    #     kernel_regularizer=None,
-    #     kernel_constraint=tf.keras.constraints.MinMaxNorm(0.01, 10.0),
-    # )(x)
-
-    # # Softplus ensures positivity, clip ensures no astronomical outliers
-    # # log1p(price) range: 0 (=$0) to 15 (≈$3.3M, well above any real car)
-    # out = layers.Lambda(
-    #     lambda t: tf.clip_by_value(tf.math.softplus(t), 0.0, 15.0),
-    #     name="pred_log1p"
-    # )(z)
-
-    # ----------------------------
-    # Output head (log1p) — linear
-    # ----------------------------
-    # out = layers.Dense(
-    #     1,
-    #     activation=None,            # linear output
-    #     kernel_regularizer=reg,     # ✅ use the already-built regularizer (or None)
-    #     name="price_log"
-    # )(x)
-
-    model_local = keras.Model(
-        inputs={"numeric": numeric_in, **cat_inputs_local},
-        outputs=out,
-        name="tabular_nn_embeddings_tuned"
+    model.compile(
+        optimizer=keras.optimizers.Adam(learning_rate=KERAS_CFG["lr"]),
+        loss="mse",
+        metrics=[keras.metrics.RootMeanSquaredError(name="rmse_log")],
     )
-
-    # Loss
-    if loss_name == "huber":
-        loss_fn = keras.losses.Huber(delta=huber_delta)
-    else:
-        loss_fn = loss_name
-
-    model_local.compile(
-        optimizer=keras.optimizers.Adam(learning_rate=lr, clipnorm=clipnorm),
-        loss=loss_fn,
-        metrics=[keras.metrics.RootMeanSquaredError(name="rmse_log")]
-    )
-
-    return model_local
+    return model
 ```
 
 #### Keras Model Training 
@@ -2476,1398 +2219,143 @@ def build_model_from_hp(hp):
 # ----------------------------
 # Step 6: Train or Load + Tuning (Hyperband -> Bayesian)
 # ----------------------------
-r'''
+
 history = None
 KERAS_RUN_DIR = None
 model = None
 
-SMOKE = (TRAIN_MODE == "smoke")
+# convenience
+def _keras_latest_exists() -> bool:
+    return latest_path.exists()
 
-# consistent callbacks (weights-only checkpoints)
-def make_callbacks(best_weights_path: str, train_mode: str):
-    if train_mode == "smoke":
-        ES_PAT = KERAS_TUNE["es_patience_smoke"]
-        RL_PAT = KERAS_TUNE["rlrop_patience_smoke"]
-    else:
-        ES_PAT = KERAS_TUNE["es_patience_full"]
-        RL_PAT = KERAS_TUNE["rlrop_patience_full"]
+def _touches_latest() -> bool:
+    return TRAIN_MODE == "full"
 
+def make_callbacks_min(train_mode: str):
+    ES_PAT = KERAS_CFG["es_patience_smoke"] if train_mode == "smoke" else KERAS_CFG["es_patience_full"]
     return [
         keras.callbacks.EarlyStopping(
             monitor="val_loss",
             patience=ES_PAT,
-            restore_best_weights=True
-        ),
-        keras.callbacks.ReduceLROnPlateau(
-            monitor="val_loss",
-            factor=KERAS_TUNE["rlrop_factor"],
-            patience=RL_PAT,
-            min_lr=KERAS_TUNE["min_lr"]
-        ),
-        keras.callbacks.ModelCheckpoint(
-            filepath=best_weights_path,
-            monitor="val_loss",
-            save_best_only=True,
-            save_weights_only=True
-        ),
+            restore_best_weights=True,
+        )
     ]
 
-# -------------------------------------------------------
-# TUNER callbacks (NO ModelCheckpoint)
-# -------------------------------------------------------
-def make_tuner_callbacks(train_mode: str):
-    if train_mode == "smoke":
-        ES_PAT = KERAS_TUNE["es_patience_smoke"]
-        RL_PAT = KERAS_TUNE["rlrop_patience_smoke"]
-    else:
-        ES_PAT = KERAS_TUNE["es_patience_full"]
-        RL_PAT = KERAS_TUNE["rlrop_patience_full"]
-
-    return [
-        keras.callbacks.EarlyStopping(
-            monitor="val_loss",
-            patience=ES_PAT,
-            restore_best_weights=True
-        ),
-        keras.callbacks.ReduceLROnPlateau(
-            monitor="val_loss",
-            factor=KERAS_TUNE["rlrop_factor"],
-            patience=RL_PAT,
-            min_lr=KERAS_TUNE["min_lr"]
-        ),
-    ]
-
-# write run info (kept)
-def write_run_info(run_dir, extra: dict):
-    info = {
-        "train_mode": TRAIN_MODE,
-        "timestamp": datetime.now().strftime("%Y%m%d_%H%M%S"),
-        "num_cols": list(num_cols_nn),
-        "cat_cols": list(cat_cols_nn),
-        "train_medians": {k: float(v) for k, v in train_medians.to_dict().items()},
-        **extra
-    }
-    atomic_write_json(run_dir / "run_info.json", info)
-
-# Minimal dataset wrapper (kept)
-AUTOTUNE = tf.data.AUTOTUNE
-
-def make_ds(inputs, y, batch_size: int, training: bool):
-    n = int(len(y))
-    if n == 0:
-        raise ValueError("Dataset has 0 rows. Check your splits / filtering.")
-
-    bs = int(min(batch_size, n))  # Never allow batch_size > n
-    ds = tf.data.Dataset.from_tensor_slices((inputs, y))
-
-    if training:
-        ds = ds.shuffle(min(n, 50_000), seed=SEED, reshuffle_each_iteration=True)
-
-        # Only drop remainder if we'd still have at least 1 batch
-        drop = (n >= bs) and (n // bs) > 0
-        ds = ds.batch(bs, drop_remainder=drop)
-    else:
-        ds = ds.batch(bs, drop_remainder=False)
-
-    return ds.prefetch(AUTOTUNE)
-
-# -------------------------------------------------------
-# 1) SKIP mode: load latest if available
-# -------------------------------------------------------
+# 1) SKIP: never train; load latest if it exists
 if TRAIN_MODE == "skip":
-    if latest_path.exists():
+    if _keras_latest_exists():
         print("✅ TRAIN_MODE='skip' — loading latest Keras model:\n ", latest_path)
         model = keras.models.load_model(latest_path, compile=False)
     else:
         print("⏭️ TRAIN_MODE='skip' — no latest Keras model found, skipping.")
         model = None
 
-# -------------------------------------------------------
-# 2) FULL mode: load latest unless retraining
-# -------------------------------------------------------
-elif (TRAIN_MODE == "full") and latest_path.exists() and (not RETRAIN_KERAS):
+# 2) FULL + no retrain: load latest if it exists
+elif (TRAIN_MODE == "full") and _keras_latest_exists() and (not RETRAIN_KERAS):
     print("✅ Loading existing Keras latest model (RETRAIN_KERAS=False, TRAIN_MODE='full'):\n ", latest_path)
     model = keras.models.load_model(latest_path, compile=False)
 
-# -------------------------------------------------------
-# 3) Otherwise TRAIN/TUNE
-# -------------------------------------------------------
+# 3) Otherwise: TRAIN (smoke always trains; full trains if retrain or missing latest)
 else:
     if not WILL_TRAIN_KERAS:
-        raise RuntimeError("WILL_TRAIN_KERAS=False but training branch entered. Check logic.")
-
-    run_ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    KERAS_RUN_DIR = KERAS_RUNS_DIR / f"run_{run_ts}_{TRAIN_MODE}"
-    KERAS_RUN_DIR.mkdir(parents=True, exist_ok=True)
-
-    versioned_path = KERAS_RUN_DIR / "keras_model.keras"
+        raise RuntimeError(
+            "Keras training branch entered, but WILL_TRAIN_KERAS=False. "
+            "Check WILL_TRAIN_KERAS logic vs TRAIN_MODE/RETRAIN_KERAS/latest_path."
+        )
 
     # ----------------------------
-    # Tuner directories (SEPARATE)
+    # Mode-specific knobs
     # ----------------------------
-    # hb_dir = KERAS_RUN_DIR / "tuning" / "hyperband"
-    # bo_dir = KERAS_RUN_DIR / "tuning" / "bayes"
-    # hb_dir.mkdir(parents=True, exist_ok=True)
-    # bo_dir.mkdir(parents=True, exist_ok=True)
+    BATCH  = KERAS_CFG["batch_smoke"] if TRAIN_MODE == "smoke" else KERAS_CFG["batch_full"]
+    EPOCHS = KERAS_CFG["epochs_smoke"] if TRAIN_MODE == "smoke" else KERAS_CFG["epochs_full"]
 
-    # ----------------------------
-    # Tuner directories (temp, local, disposable)
-    # Final artifacts still saved under KERAS_RUN_DIR
-    # ----------------------------
-    tuning_root = Path(tempfile.gettempdir()) / "used_car_kt" / f"run_{run_ts}_{TRAIN_MODE}"
-    hb_dir = tuning_root / "hyperband"
-    bo_dir = tuning_root / "bayes"
-
-    # Start fresh every run
-    if tuning_root.exists():
-        shutil.rmtree(tuning_root, ignore_errors=True)
-
-    hb_dir.mkdir(parents=True, exist_ok=True)
-    bo_dir.mkdir(parents=True, exist_ok=True)
-
-    HB_PROJECT = f"hb_{run_ts}"
-    BO_PROJECT = f"bo_{run_ts}"
-
-    print("tuning_root (TEMP) =", tuning_root)
-    print("hb_dir =", hb_dir, "| HB_PROJECT =", HB_PROJECT)
-    print("bo_dir =", bo_dir, "| BO_PROJECT =", BO_PROJECT)
-
-    # ----------------------------
-    # Budgets per mode
-    # ----------------------------
-    if SMOKE:
-        EPOCHS = KERAS_TUNE["epochs_smoke"]
-        HB_MAX_EPOCHS = KERAS_TUNE["hb_max_epochs_smoke"]
-        BAYES_EPOCHS = KERAS_TUNE["bayes_epochs_smoke"]
-        BAYES_TRIALS = KERAS_TUNE["bayes_max_trials_smoke"]
-        BATCH = KERAS_TUNE["batch_smoke"]
-        HB_EXEC = KERAS_TUNE["hb_executions_per_trial"]
-        BAYES_EXEC = KERAS_TUNE["bayes_executions_per_trial"]
-    else:
-        EPOCHS = KERAS_TUNE["epochs_full"]
-        HB_MAX_EPOCHS = KERAS_TUNE["hb_max_epochs_full"]
-        BAYES_EPOCHS = KERAS_TUNE["bayes_epochs_full"]
-        BAYES_TRIALS = KERAS_TUNE["bayes_max_trials_full"]
-        BATCH = KERAS_TUNE["batch_full"]
-        HB_EXEC = KERAS_TUNE["hb_executions_per_trial"]
-        BAYES_EXEC = KERAS_TUNE["bayes_executions_per_trial"]
-
-    # ----------------------------
-    # Optional SMOKE subsampling (kept)
-    # ----------------------------
-    # if SMOKE and KERAS_TUNE.get("smoke_subsample", False):
-    #     rs = np.random.RandomState(SEED)
-
-    #     ntr = min(int(KERAS_TUNE.get("smoke_train_n", 20000)), len(y_train_nn))
-    #     nva = min(int(KERAS_TUNE.get("smoke_val_n", 5000)), len(y_val_nn))
-
-    #     idx_tr = rs.choice(len(y_train_nn), size=ntr, replace=False)
-    #     idx_va = rs.choice(len(y_val_nn),   size=nva, replace=False)
-
-    #     train_inputs_run = {k: v[idx_tr] for k, v in train_inputs.items()}
-    #     y_train_run = y_train_nn[idx_tr]
-
-    #     val_inputs_run = {k: v[idx_va] for k, v in val_inputs.items()}
-    #     y_val_run = y_val_nn[idx_va]
-
-    #     print(
-    #         f"🧪 Smoke subsample enabled: train={ntr:,} val={nva:,} | "
-    #         f"batch={BATCH} | hb_epochs={HB_MAX_EPOCHS} | bayes_epochs={BAYES_EPOCHS} | bayes_trials={BAYES_TRIALS}"
-    #     )
-    # else:
-    #     train_inputs_run, y_train_run = train_inputs, y_train_nn
-    #     val_inputs_run, y_val_run = val_inputs, y_val_nn
-
-    # ----------------------------
-    # Optional SMOKE subsampling (SAFE: always convert to TF right after)
-    # ----------------------------
-    if SMOKE and KERAS_TUNE.get("smoke_subsample", False):
+    # optional smoke subsample (stable)
+    if TRAIN_MODE == "smoke" and KERAS_CFG.get("smoke_subsample", False):
         rs = np.random.RandomState(SEED)
-
-        ntr = min(int(KERAS_TUNE.get("smoke_train_n", 20000)), len(y_train_nn))
-        nva = min(int(KERAS_TUNE.get("smoke_val_n", 5000)), len(y_val_nn))
+        ntr = min(int(KERAS_CFG["smoke_train_n"]), len(y_train_nn))
+        nva = min(int(KERAS_CFG["smoke_val_n"]), len(y_val_nn))
 
         idx_tr = rs.choice(len(y_train_nn), size=ntr, replace=False)
-        idx_va = rs.choice(len(y_val_nn),   size=nva, replace=False)
+        idx_va = rs.choice(len(y_val_nn), size=nva, replace=False)
 
-        # NOTE: train_inputs/val_inputs are numpy-friendly dicts from to_input_dict()
-        train_inputs_run_np = {k: v[idx_tr] for k, v in train_inputs.items()}
+        train_inputs_run = {k: tf.gather(v, idx_tr, axis=0) for k, v in train_inputs_tf.items()}
+        val_inputs_run   = {k: tf.gather(v, idx_va, axis=0) for k, v in val_inputs_tf.items()}
         y_train_run = y_train_nn[idx_tr]
-
-        val_inputs_run_np = {k: v[idx_va] for k, v in val_inputs.items()}
-        y_val_run = y_val_nn[idx_va]
-
-        print(
-            f"🧪 Smoke subsample enabled: train={ntr:,} val={nva:,} | "
-            f"batch={BATCH} | hb_epochs={HB_MAX_EPOCHS} | bayes_epochs={BAYES_EPOCHS} | bayes_trials={BAYES_TRIALS}"
-        )
+        y_val_run   = y_val_nn[idx_va]
+        print(f"🧪 Smoke subsample: train={ntr:,} val={nva:,}")
     else:
-        train_inputs_run_np, y_train_run = train_inputs, y_train_nn
-        val_inputs_run_np,   y_val_run   = val_inputs,   y_val_nn
-
-    # ✅ Convert to TF *once* and use ONLY these for make_ds / fit / predict
-    train_inputs_run_tf = to_tf_inputs(train_inputs_run_np)
-    val_inputs_run_tf   = to_tf_inputs(val_inputs_run_np)
-
-    # 🔒 Optional safety: prevent accidental use of numpy dicts later (recommended)
-    train_inputs_run_np = None
-    val_inputs_run_np   = None
-
-    # Create datasets once and reuse for tuner + final fit
-    # train_ds = make_ds(train_inputs_run, y_train_run, BATCH, training=True)
-    # val_ds   = make_ds(val_inputs_run,   y_val_run,   BATCH, training=False)
-
-    train_ds = make_ds(train_inputs_run_tf, y_train_run, BATCH, training=True)
-    val_ds   = make_ds(val_inputs_run_tf,   y_val_run,   BATCH, training=False)
-
-    # Objective: minimize validation loss in log space
-    objective = kt.Objective("val_loss", direction="min")
-
-    print("num feature count =", len(num_cols_nn))
-    print("cat feature count =", len(cat_cols_nn))
-    print("train numeric shape =", train_inputs_run_tf["numeric"].shape)
-    print("one cat example shape =", train_inputs_run_tf[cat_cols_nn[0]].shape if cat_cols_nn else None)
-    print("y_train shape =", y_train_run.shape)
+        train_inputs_run, val_inputs_run = train_inputs_tf, val_inputs_tf
+        y_train_run, y_val_run = y_train_nn, y_val_nn
 
     # ----------------------------
-    # TUNING STAGE 1 (coarse): Hyperband
+    # Create run folder + paths
     # ----------------------------
-    print("🧭 TUNING STAGE 1 (coarse): Hyperband")
-    gc.collect()
-
-    hb_callbacks = make_tuner_callbacks(TRAIN_MODE)
-
-    hb = kt.Hyperband(
-        hypermodel=build_model_from_hp,
-        objective=objective,
-        max_epochs=HB_MAX_EPOCHS,
-        factor=KERAS_TUNE["hb_factor"],
-        executions_per_trial=HB_EXEC,
-        directory=str(hb_dir),
-        project_name=HB_PROJECT,
-        overwrite=True,
-    )
-
-    hb.search(
-        train_ds,
-        validation_data=val_ds,
-        epochs=HB_MAX_EPOCHS,
-        callbacks=hb_callbacks,
-        verbose=0,
-    )
-
-    best_hp_hb = hb.get_best_hyperparameters(1)[0]
-    print("✅ Best HP from Hyperband:", best_hp_hb.values)
-
-    # ----------------------------
-    # TUNING STAGE 2 (fine): BayesianOptimization
-    # ----------------------------
-    print("🎯 TUNING STAGE 2 (fine): BayesianOptimization")
-    tf.keras.backend.clear_session()
-    gc.collect()
-
-    bo_callbacks = make_tuner_callbacks(TRAIN_MODE)
-
-    bo = kt.BayesianOptimization(
-        hypermodel=build_model_from_hp,
-        objective=objective,
-        max_trials=BAYES_TRIALS,
-        executions_per_trial=BAYES_EXEC,
-        directory=str(bo_dir),
-        project_name=BO_PROJECT,
-        overwrite=True,
-    )
-
-    bo.search(
-        train_ds,
-        validation_data=val_ds,
-        epochs=BAYES_EPOCHS,
-        callbacks=bo_callbacks,
-        verbose=0,
-    )
-
-    best_hp = bo.get_best_hyperparameters(1)[0]
-    print("🏆 Best HP from BayesianOptimization:", best_hp.values)
-
-    # ----------------------------
-    # FINAL FIT using best HP (FROM SCRATCH) — stable path
-    # ----------------------------
-    print("🔁 Final training with best hyperparameters (from scratch)")
-    tf.keras.backend.clear_session()
-    gc.collect()
-
-    model = build_model_from_hp(best_hp)
-
-    # ----------------------------
-    # DEBUG
-    # ----------------------------
-    # ✅ In SMOKE: rely on EarlyStopping(restore_best_weights=True) ONLY.
-    # Do NOT use ModelCheckpoint weights in smoke (they've been degenerating).
-    if TRAIN_MODE == "smoke":
-        final_callbacks = make_tuner_callbacks(TRAIN_MODE)  # ES + RLRP only
-        final_best_weights_path = None
-    else:
-        final_best_weights_path = str(KERAS_RUN_DIR / "best_final.weights.h5")
-        final_callbacks = make_callbacks(final_best_weights_path, TRAIN_MODE)
-
-    # ----------------------------
-    # DEBUG
-    # ----------------------------
-# ADD BACK LATER
-    # final_best_weights_path = str(KERAS_RUN_DIR / "best_final.weights.h5")
-    # final_callbacks = make_callbacks(final_best_weights_path, TRAIN_MODE)
-
-    history = model.fit(
-        train_ds,
-        validation_data=val_ds,
-        epochs=EPOCHS,
-        verbose=0,
-        callbacks=final_callbacks
-    )
-
-    # ==========================================================
-    # DEBUG 
-    # STEP 3: Immediate post-training prediction variance check
-    # Place this IMMEDIATELY after:
-    #   history = model.fit(...)
-    # and BEFORE any load_weights(), model.save(), clear_session(), or reloads.
-    # ==========================================================
-    print("\n--- STEP 3: immediate post-fit prediction variance check ---")
-
-    dbg_inputs = {}
-
-    # Use the TF-safe dict you already created for datasets:
-    #   val_inputs_run_tf
-    for k, v in val_inputs_run_tf.items():
-        if k == "numeric":
-            dbg_inputs[k] = v[:2048, :]
-        else:
-            # v is already tf.string tensor; keep shape consistent
-            dbg_inputs[k] = v[:2048]
-
-    pred_now = model.predict(dbg_inputs, batch_size=256, verbose=0).ravel()
-    pred_now = np.asarray(pred_now, dtype="float64")
-
-    print(
-        "pred_now: std=",
-        float(np.std(pred_now)),
-        "min/med/max=",
-        float(np.min(pred_now)),
-        float(np.median(pred_now)),
-        float(np.max(pred_now)),
-    )
-
-    true_now = y_val_run[:2048].ravel().astype("float64")
-    print(
-        "true_now: std=",
-        float(np.std(true_now)),
-        "min/med/max=",
-        float(np.min(true_now)),
-        float(np.median(true_now)),
-        float(np.max(true_now)),
-    )
-
-    ratio = float(np.std(pred_now) / (np.std(true_now) + 1e-12))
-    print("std(pred_now) / std(true_now) =", ratio)
-
-    # ✅ IMPORTANT: Remove/disable ANY manual load_weights in SMOKE
-    if (TRAIN_MODE != "smoke") and final_best_weights_path and os.path.exists(final_best_weights_path):
-        model.load_weights(final_best_weights_path)
-        print("✅ Loaded best FINAL weights:", final_best_weights_path)
-    else:
-        print("ℹ️ Using EarlyStopping-restored weights (no manual load_weights).")
-
-    # ==========================================================
-    # END OF DEBUG
-    # ==========================================================
-# Add BACK LATER
-    # Load best FINAL weights explicitly (weights-only checkpoint)
-
-    # if os.path.exists(final_best_weights_path):
-    #     model.load_weights(final_best_weights_path)
-    #     print("✅ Loaded best FINAL weights:", final_best_weights_path)
-    # else:
-    #     print("⚠️ Best weights file not found:", final_best_weights_path)
-
-   
-    _ = model(
-    {
-        "numeric": val_inputs_run_tf["numeric"][:2, :],
-        **{c: val_inputs_run_tf[c][:2] for c in cat_cols_nn}
-    },
-    training=False
-)
-
-    # Save FULL model artifact (versioned)
-    model.save(versioned_path, include_optimizer=False)
-    print("💾 Saved versioned FULL model:", versioned_path)
-
-    # Update "latest" only for full mode
-    if TRAIN_MODE == "full":
-        model.save(latest_path, include_optimizer=False)
-        print("✅ Updated latest FULL model:", latest_path)
-    else:
-        print("🚫 Smoke run: NOT updating latest pointer.")
-
-    # Persist tuning results + chosen hp (kept)
-    write_run_info(KERAS_RUN_DIR, extra={
-        "tuning": {
-            "strategy": "hyperband_then_bayes",
-            "hyperband_best": dict(best_hp_hb.values),
-            "bayes_best": dict(best_hp.values),
-            "hb_max_epochs": int(HB_MAX_EPOCHS),
-            "bayes_epochs": int(BAYES_EPOCHS),
-            "bayes_max_trials": int(BAYES_TRIALS),
-            "hyperband_dir": str(hb_dir),
-            "bayes_dir": str(bo_dir),
-            "smoke_subsample": bool(SMOKE and KERAS_TUNE.get("smoke_subsample", False)),
-            "smoke_train_n": int(KERAS_TUNE.get("smoke_train_n", 0)) if SMOKE else None,
-            "smoke_val_n": int(KERAS_TUNE.get("smoke_val_n", 0)) if SMOKE else None,
-            "batch": int(BATCH),
-            "final_epochs_cap": int(EPOCHS),
-        }
-    })
-
-    atomic_write_json(KERAS_RUN_DIR / "best_hp.json", dict(best_hp.values))
-    print("🧾 Wrote best_hp.json:", KERAS_RUN_DIR / "best_hp.json")
-'''
-```
-
-#### Training V2
-```{python}
-# ----------------------------
-# Step 6: Train or Load + Tuning (Hyperband -> Bayesian)
-# ----------------------------
-
-history = None
-KERAS_RUN_DIR = None
-model = None
-
-SMOKE = (TRAIN_MODE == "smoke")
-
-# ----------------------------
-# Callbacks
-# ----------------------------
-def make_callbacks(best_weights_path: str, train_mode: str):
-    """Final fit callbacks — always uses ModelCheckpoint to own best-weight tracking."""
-    ES_PAT = KERAS_TUNE["es_patience_smoke"] if train_mode == "smoke" else KERAS_TUNE["es_patience_full"]
-    RL_PAT = KERAS_TUNE["rlrop_patience_smoke"] if train_mode == "smoke" else KERAS_TUNE["rlrop_patience_full"]
-
-    return [
-        keras.callbacks.EarlyStopping(
-            monitor="val_loss",
-            patience=ES_PAT,
-            restore_best_weights=False,  # ModelCheckpoint owns this; avoids in-memory restore race
-        ),
-        keras.callbacks.ReduceLROnPlateau(
-            monitor="val_loss",
-            factor=KERAS_TUNE["rlrop_factor"],
-            patience=RL_PAT,
-            min_lr=KERAS_TUNE["min_lr"],
-        ),
-        keras.callbacks.ModelCheckpoint(
-            filepath=best_weights_path,
-            monitor="val_loss",
-            save_best_only=True,
-            save_weights_only=True,
-        ),
-    ]
-
-
-def make_tuner_callbacks(train_mode: str):
-    """Tuner-trial callbacks — no ModelCheckpoint (KerasTuner manages its own state)."""
-    ES_PAT = KERAS_TUNE["es_patience_smoke"] if train_mode == "smoke" else KERAS_TUNE["es_patience_full"]
-    RL_PAT = KERAS_TUNE["rlrop_patience_smoke"] if train_mode == "smoke" else KERAS_TUNE["rlrop_patience_full"]
-
-    return [
-        keras.callbacks.EarlyStopping(
-            monitor="val_loss",
-            patience=ES_PAT,
-            restore_best_weights=True,  # fine for tuner trials (in-memory only, not persisted)
-        ),
-        keras.callbacks.ReduceLROnPlateau(
-            monitor="val_loss",
-            factor=KERAS_TUNE["rlrop_factor"],
-            patience=RL_PAT,
-            min_lr=KERAS_TUNE["min_lr"],
-        ),
-    ]
-
-
-# ----------------------------
-# Helpers
-# ----------------------------
-def write_run_info(run_dir, extra: dict):
-    info = {
-        "train_mode": TRAIN_MODE,
-        "timestamp": datetime.now().strftime("%Y%m%d_%H%M%S"),
-        "num_cols": list(num_cols_nn),
-        "cat_cols": list(cat_cols_nn),
-        "train_medians": {k: float(v) for k, v in train_medians.to_dict().items()},
-        **extra,
-    }
-    atomic_write_json(run_dir / "run_info.json", info)
-
-
-AUTOTUNE = tf.data.AUTOTUNE
-
-
-def make_ds(inputs, y, batch_size: int, training: bool):
-    n = int(len(y))
-    if n == 0:
-        raise ValueError("Dataset has 0 rows. Check your splits / filtering.")
-
-    bs = int(min(batch_size, n))
-    ds = tf.data.Dataset.from_tensor_slices((inputs, y))
-
-    if training:
-        ds = ds.shuffle(min(n, 50_000), seed=SEED, reshuffle_each_iteration=True)
-        # ✅ Only drop remainder if at least 2 full batches exist
-        # Prevents empty final batch causing clipnorm shape mismatch in Adam
-        drop = (n // bs) >= 2
-        ds = ds.batch(bs, drop_remainder=drop)
-    else:
-        ds = ds.batch(bs, drop_remainder=False)
-
-    return ds.prefetch(AUTOTUNE)
-
-
-# -------------------------------------------------------
-# 1) SKIP mode
-# -------------------------------------------------------
-if TRAIN_MODE == "skip":
-    if latest_path.exists():
-        print("✅ TRAIN_MODE='skip' — loading latest Keras model:\n ", latest_path)
-        model = keras.models.load_model(latest_path, compile=False)
-    else:
-        print("⏭️ TRAIN_MODE='skip' — no latest Keras model found, skipping.")
-        model = None
-
-# -------------------------------------------------------
-# 2) FULL mode: load latest unless retraining
-# -------------------------------------------------------
-elif (TRAIN_MODE == "full") and latest_path.exists() and (not RETRAIN_KERAS):
-    print("✅ Loading existing Keras latest model (RETRAIN_KERAS=False, TRAIN_MODE='full'):\n ", latest_path)
-    model = keras.models.load_model(latest_path, compile=False)
-
-# -------------------------------------------------------
-# 3) Train / tune
-# -------------------------------------------------------
-else:
-    if not WILL_TRAIN_KERAS:
-        raise RuntimeError("WILL_TRAIN_KERAS=False but training branch entered. Check logic.")
-
     run_ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    KERAS_RUN_DIR = KERAS_RUNS_DIR / f"run_{run_ts}_{TRAIN_MODE}"
+    KERAS_RUN_DIR = KERAS_RUNS_DIR / run_dir_name(run_ts, TRAIN_MODE)
     KERAS_RUN_DIR.mkdir(parents=True, exist_ok=True)
 
+    best_weights_path = str(KERAS_RUN_DIR / "best.weights.h5")
     versioned_path = KERAS_RUN_DIR / "keras_model.keras"
 
-    # Tuner dirs in temp (disposable)
-    tuning_root = Path(tempfile.gettempdir()) / "used_car_kt" / f"run_{run_ts}_{TRAIN_MODE}"
-    hb_dir = tuning_root / "hyperband"
-    bo_dir = tuning_root / "bayes"
-    if tuning_root.exists():
-        shutil.rmtree(tuning_root, ignore_errors=True)
-    hb_dir.mkdir(parents=True, exist_ok=True)
-    bo_dir.mkdir(parents=True, exist_ok=True)
+    # write run_info (matches your style)
+    run_info = {
+        "run_ts": run_ts,
+        "train_mode": TRAIN_MODE,
+        "retrain_keras": bool(RETRAIN_KERAS),
+        "updates_latest": bool(_touches_latest()),
+        "train_rows": int(len(y_train_run)),
+        "val_rows": int(len(y_val_run)),
+        "num_cols": list(num_cols_nn),
+        "cat_cols": list(cat_cols_nn),
+        "keras_cfg": dict(KERAS_CFG),
+    }
+    atomic_write_json(KERAS_RUN_DIR / "run_info.json", run_info)
 
-    HB_PROJECT = f"hb_{run_ts}"
-    BO_PROJECT = f"bo_{run_ts}"
+    # keep the imputation medians used
+    atomic_write_json(
+        KERAS_RUN_DIR / "train_medians.json",
+        {k: float(v) for k, v in train_medians.to_dict().items()}
+    )
 
-    print("tuning_root (TEMP) =", tuning_root)
-    print("hb_dir =", hb_dir, "| HB_PROJECT =", HB_PROJECT)
-    print("bo_dir =", bo_dir, "| BO_PROJECT =", BO_PROJECT)
-
-    # Budgets per mode
-    if SMOKE:
-        EPOCHS       = KERAS_TUNE["epochs_smoke"]
-        HB_MAX_EPOCHS = KERAS_TUNE["hb_max_epochs_smoke"]
-        BAYES_EPOCHS  = KERAS_TUNE["bayes_epochs_smoke"]
-        BAYES_TRIALS  = KERAS_TUNE["bayes_max_trials_smoke"]
-        BATCH         = KERAS_TUNE["batch_smoke"]
-    else:
-        EPOCHS        = KERAS_TUNE["epochs_full"]
-        HB_MAX_EPOCHS = KERAS_TUNE["hb_max_epochs_full"]
-        BAYES_EPOCHS  = KERAS_TUNE["bayes_epochs_full"]
-        BAYES_TRIALS  = KERAS_TUNE["bayes_max_trials_full"]
-        BATCH         = KERAS_TUNE["batch_full"]
-
-    HB_EXEC   = KERAS_TUNE["hb_executions_per_trial"]
-    BAYES_EXEC = KERAS_TUNE["bayes_executions_per_trial"]
-
-    # Optional smoke subsampling
-    if SMOKE and KERAS_TUNE.get("smoke_subsample", False):
-        rs  = np.random.RandomState(SEED)
-        ntr = min(int(KERAS_TUNE.get("smoke_train_n", 20000)), len(y_train_nn))
-        nva = min(int(KERAS_TUNE.get("smoke_val_n",   5000)),  len(y_val_nn))
-
-        idx_tr = rs.choice(len(y_train_nn), size=ntr, replace=False)
-        idx_va = rs.choice(len(y_val_nn),   size=nva, replace=False)
-
-        train_inputs_run_np = {k: v[idx_tr] for k, v in train_inputs.items()}
-        y_train_run         = y_train_nn[idx_tr]
-        val_inputs_run_np   = {k: v[idx_va] for k, v in val_inputs.items()}
-        y_val_run           = y_val_nn[idx_va]
-
-        print(
-            f"🧪 Smoke subsample: train={ntr:,} val={nva:,} | "
-            f"batch={BATCH} | hb_epochs={HB_MAX_EPOCHS} | "
-            f"bayes_epochs={BAYES_EPOCHS} | bayes_trials={BAYES_TRIALS}"
+    if TRAIN_MODE == "smoke":
+        atomic_write_bytes(
+            KERAS_RUN_DIR / "SMOKE_RUN_DO_NOT_USE.txt",
+            b"This is a smoke test run. Do not use as production/latest.\n"
         )
-    else:
-        train_inputs_run_np, y_train_run = train_inputs, y_train_nn
-        val_inputs_run_np,   y_val_run   = val_inputs,   y_val_nn
-
-    # Convert to TF once; nullify numpy refs
-    train_inputs_run_tf = to_tf_inputs(train_inputs_run_np)
-    val_inputs_run_tf   = to_tf_inputs(val_inputs_run_np)
-    train_inputs_run_np = None
-    val_inputs_run_np   = None
-
-    train_ds = make_ds(train_inputs_run_tf, y_train_run, BATCH, training=True)
-    val_ds   = make_ds(val_inputs_run_tf,   y_val_run,   BATCH, training=False)
-
-    objective = kt.Objective("val_loss", direction="min")
-
-    print("num feature count =", len(num_cols_nn))
-    print("cat feature count =", len(cat_cols_nn))
-    print("train numeric shape =", train_inputs_run_tf["numeric"].shape)
-    print("one cat example shape =", train_inputs_run_tf[cat_cols_nn[0]].shape if cat_cols_nn else None)
-    print("y_train shape =", y_train_run.shape)
 
     # ----------------------------
-    # TUNING STAGE 1: Hyperband
+    # Build + train
     # ----------------------------
-    print("🧭 TUNING STAGE 1 (coarse): Hyperband")
-    gc.collect()
-
-    hb = kt.Hyperband(
-        hypermodel=build_model_from_hp,
-        objective=objective,
-        max_epochs=HB_MAX_EPOCHS,
-        factor=KERAS_TUNE["hb_factor"],
-        executions_per_trial=HB_EXEC,
-        directory=str(hb_dir),
-        project_name=HB_PROJECT,
-        overwrite=True,
-    )
-    hb.search(
-        train_ds,
-        validation_data=val_ds,
-        epochs=HB_MAX_EPOCHS,
-        callbacks=make_tuner_callbacks(TRAIN_MODE),
-        verbose=0,
-    )
-    best_hp_hb = hb.get_best_hyperparameters(1)[0]
-    print("✅ Best HP from Hyperband:", best_hp_hb.values)
-
-    # ----------------------------
-    # TUNING STAGE 2: BayesianOptimization
-    # ----------------------------
-    print("🎯 TUNING STAGE 2 (fine): BayesianOptimization")
     tf.keras.backend.clear_session()
     gc.collect()
 
-    bo = kt.BayesianOptimization(
-        hypermodel=build_model_from_hp,
-        objective=objective,
-        max_trials=BAYES_TRIALS,
-        executions_per_trial=BAYES_EXEC,
-        directory=str(bo_dir),
-        project_name=BO_PROJECT,
-        overwrite=True,
-    )
-    bo.search(
-        train_ds,
-        validation_data=val_ds,
-        epochs=BAYES_EPOCHS,
-        callbacks=make_tuner_callbacks(TRAIN_MODE),
-        verbose=0,
-    )
-    best_hp = bo.get_best_hyperparameters(1)[0]
-    print("🏆 Best HP from BayesianOptimization:", best_hp.values)
+    model = build_baseline_model()
 
-    # ----------------------------
-    # FINAL FIT from scratch with best HP
-    # ----------------------------
-    print("🔁 Final training with best hyperparameters (from scratch)")
-    tf.keras.backend.clear_session()
-    gc.collect()
-
-    # ✅ Rebuild datasets AFTER clear_session() — the old tf.data graphs were invalidated
-    train_ds_final = make_ds(train_inputs_run_tf, y_train_run, BATCH, training=True)
-    val_ds_final   = make_ds(val_inputs_run_tf,   y_val_run,   BATCH, training=False)
-
-    # ----------------------------
-    # Sanity-clamp best_hp before final fit
-    # Prevents tuner from handing us pathological configs
-    # that work at tuner-budget epochs but collapse at full training length
-    # ----------------------------
-    def _safe_hp_values(hp_obj, train_mode: str) -> dict:
-        """
-        Return a cleaned copy of HP values with safety floors/ceilings applied.
-        These constraints apply in ALL modes — they encode known-bad regions
-        that the tuner can stumble into due to budget mismatch.
-        """
-        v = dict(hp_obj.values)
-
-        v["output_l2"] = 0.0
-
-        # huber_delta < 0.5 approaches MAE and causes median collapse
-        if v.get("loss") == "huber":
-            v["huber_delta"] = max(v.get("huber_delta", 1.0), 0.5)
-
-        # High dropout + no residuals = dead signal, especially in deeper networks
-        if not v.get("use_residuals", True):
-            v["drop1"] = min(v.get("drop1", 0.3), 0.3)
-            v["drop2"] = min(v.get("drop2", 0.3), 0.3)
-            v["drop3"] = min(v.get("drop3", 0.2), 0.2)
-
-        return v
-
-
-    best_hp_values = _safe_hp_values(best_hp, TRAIN_MODE)
-    print("🔒 Clamped HP values for final fit:", best_hp_values)
-
-    # Rebuild a clean HyperParameters object from clamped values
-
-    best_hp_clamped = kt.HyperParameters()
-    for k, v in best_hp_values.items():
-        if not k.startswith("tuner/"):   # skip tuner internal keys
-            best_hp_clamped.Fixed(k, v)
-
-    model = build_model_from_hp(best_hp_clamped)
-
-    # model = build_model_from_hp(best_hp)
-
-    final_best_weights_path = str(KERAS_RUN_DIR / "best_final.weights.h5")
-    final_callbacks = make_callbacks(final_best_weights_path, TRAIN_MODE)
-
+    print(f"🚆 Training Keras | mode={TRAIN_MODE} | epochs={EPOCHS} | batch={BATCH}")
     history = model.fit(
-        train_ds_final,
-        validation_data=val_ds_final,
+        train_inputs_run, y_train_run,
+        validation_data=(val_inputs_run, y_val_run),
         epochs=EPOCHS,
+        batch_size=min(int(BATCH), int(len(y_train_run))),  # safety if smoke tiny
         verbose=0,
-        callbacks=final_callbacks,
+        callbacks=make_callbacks_min(TRAIN_MODE),
     )
 
-    # Explicitly load best weights from disk
-    if os.path.exists(final_best_weights_path):
-        model.load_weights(final_best_weights_path)
-        print("✅ Loaded best weights from checkpoint:", final_best_weights_path)
-    else:
-        print("⚠️ No checkpoint found — using final-epoch weights")
+    # restore best weights
+    if os.path.exists(best_weights_path):
+        model.load_weights(best_weights_path)
+        print("✅ Loaded best weights:", best_weights_path)
 
-    # 2. BatchNorm calibration — fixes running statistics
-    print("🔧 Calibrating BatchNorm running statistics...")
-    for layer in model.layers:
-        if isinstance(layer, tf.keras.layers.BatchNormalization):
-            layer.moving_mean.assign(tf.zeros_like(layer.moving_mean))
-            layer.moving_variance.assign(tf.ones_like(layer.moving_variance))
-
-    @tf.function
-    def calibration_step(x_batch):
-        model(x_batch, training=True)
-
-    calib_ds = make_ds(train_inputs_run_tf, y_train_run, BATCH, training=False).take(100)
-    for x_batch, _ in calib_ds:
-        calibration_step(x_batch)
-    print("✅ BatchNorm calibration complete")
-
-    # 3. Warm-up forward pass — ensures graph is fully traced before saving
-    _ = model(
-        {
-            "numeric": val_inputs_run_tf["numeric"][:2, :],
-            **{c: val_inputs_run_tf[c][:2] for c in cat_cols_nn},
-        },
-        training=False,
-    )
-
+    # save versioned always
     model.save(versioned_path, include_optimizer=False)
     print("💾 Saved versioned model:", versioned_path)
 
-    if TRAIN_MODE == "full":
+    # update latest only for FULL
+    if _touches_latest():
         model.save(latest_path, include_optimizer=False)
         print("✅ Updated latest model:", latest_path)
     else:
         print("🚫 Smoke run: NOT updating latest pointer.")
-
-    # Persist run metadata
-    write_run_info(KERAS_RUN_DIR, extra={
-        "tuning": {
-            "strategy": "hyperband_then_bayes",
-            "hyperband_best": dict(best_hp_hb.values),
-            "bayes_best": dict(best_hp.values),
-            "hb_max_epochs": int(HB_MAX_EPOCHS),
-            "bayes_epochs": int(BAYES_EPOCHS),
-            "bayes_max_trials": int(BAYES_TRIALS),
-            "hyperband_dir": str(hb_dir),
-            "bayes_dir": str(bo_dir),
-            "smoke_subsample": bool(SMOKE and KERAS_TUNE.get("smoke_subsample", False)),
-            "smoke_train_n": int(KERAS_TUNE.get("smoke_train_n", 0)) if SMOKE else None,
-            "smoke_val_n": int(KERAS_TUNE.get("smoke_val_n", 0)) if SMOKE else None,
-            "batch": int(BATCH),
-            "final_epochs_cap": int(EPOCHS),
-        }
-    })
-
-    atomic_write_json(KERAS_RUN_DIR / "best_hp.json", dict(best_hp.values))
-    print("🧾 Wrote best_hp.json:", KERAS_RUN_DIR / "best_hp.json")
-```
-
-#### Debugging
-
-```{python}
-z_layer = model.get_layer("z_logit")
-z_model = tf.keras.Model(inputs=model.inputs, outputs=z_layer.output)
-z_vals = z_model(test_inputs_tf, training=False).numpy().ravel()
-
-print("z min/med/max:", z_vals.min(), np.median(z_vals), z_vals.max())
-print("tanh saturation |z|>2:", (np.abs(z_vals) > 2).mean())
-print("tanh saturation |z|>3:", (np.abs(z_vals) > 3).mean())
-
-pred_log = model(test_inputs_tf, training=False).numpy().ravel()
-print("pred_log min/med/max:", pred_log.min(), np.median(pred_log), pred_log.max())
-print("pred $ max:", np.expm1(pred_log.max()))
-
-# ==========================================================
-# KERAS DEBUG SNAPSHOT (paste-once cell)
-# Put this AFTER Step 6 (train/load) and BEFORE evaluation.
-# Works in smoke/full/skip.
-# ==========================================================
-
-# probe_size = 512
-# probe_inputs = {
-#     "numeric": test_inputs_tf["numeric"][:probe_size],
-#     **{c: test_inputs_tf[c][:probe_size] for c in cat_cols_nn}
-# }
-# # =====================================================================
-# # OUTPUT LAYER WEIGHT INSPECTOR
-# # =====================================================================
-# out_layer = model.get_layer("pred_log1p")
-# kernel, bias = out_layer.get_weights()
-# print(f"Output kernel shape: {kernel.shape}")
-# print(f"Output kernel norm:  {np.linalg.norm(kernel):.6f}")
-# print(f"Output kernel std:   {kernel.std():.6f}")
-# print(f"Output kernel min/max: {kernel.min():.6f} / {kernel.max():.6f}")
-# print(f"Output bias: {bias}")
-# print()
-
-# # Also check the layer just before it
-# prev_layer = model.get_layer("add_3")  # or "dropout_5" depending on architecture
-# prev_model = tf.keras.Model(inputs=model.inputs, outputs=prev_layer.output)
-# prev_out = prev_model(probe_inputs, training=False).numpy()
-# print(f"Pre-output layer output std: {prev_out.std():.6f}")
-# print(f"Expected output std if kernel were normal: {prev_out.std() * kernel.std() * np.sqrt(kernel.shape[0]):.6f}")
-
-# Another test
-
-# Does the model produce variance when called with training=True?
-# pred_train_mode = model(probe_inputs, training=True).numpy().flatten()
-# pred_infer_mode = model(probe_inputs, training=False).numpy().flatten()
-
-# print(f"training=True  std: {pred_train_mode.std():.6f}  min/max: {pred_train_mode.min():.4f}/{pred_train_mode.max():.4f}")
-# print(f"training=False std: {pred_infer_mode.std():.6f}  min/max: {pred_infer_mode.min():.4f}/{pred_infer_mode.max():.4f}")
-
-# =====================================================================
-# LAYER-BY-LAYER VARIANCE PROBE
-# =====================================================================
-
-# Use a small batch of test data with known diversity
-probe_size = 512
-probe_inputs = {
-    "numeric": test_inputs_tf["numeric"][:probe_size],
-    **{c: test_inputs_tf[c][:probe_size] for c in cat_cols_nn}
-}
-
-# Build intermediate models for each key layer
-layer_names_to_probe = [l.name for l in model.layers]
-print(f"Total layers: {len(layer_names_to_probe)}")
-print()
-
-# Probe every layer that has a meaningful output
-for layer in model.layers:
-    try:
-        intermediate = tf.keras.Model(inputs=model.inputs, outputs=layer.output)
-        out = intermediate(probe_inputs, training=False).numpy()
-        flat = out.flatten()
-        print(f"{layer.name:45s}  shape={str(out.shape):20s}  "
-              f"std={flat.std():.6f}  min={flat.min():.4f}  max={flat.max():.4f}")
-    except Exception as e:
-        print(f"{layer.name:45s}  SKIP ({e})")
-
-# =====================================================================
-# PREPROCESSING OUTPUT PROBE
-# =====================================================================
-# Check what the normalization layer actually outputs
-norm_layer = model.get_layer("num_norm")  # adjust name if different
-norm_model = tf.keras.Model(inputs=model.get_layer(index=0).input 
-                             if False else model.inputs, 
-                             outputs=norm_layer.output)
-norm_out = norm_model(probe_inputs, training=False).numpy()
-print(f"\nAfter normalization: shape={norm_out.shape}")
-print(f"  std per feature (first 5): {norm_out.std(axis=0)[:5]}")
-print(f"  overall std: {norm_out.std():.6f}")
-print(f"  near-zero std features: {(norm_out.std(axis=0) < 0.01).sum()} / {norm_out.shape[1]}")
-
-# ==========================================================
-# DEBUG helper: force static shapes for model inputs
-# (local to debug cell)
-# ==========================================================
-def _force_static_shapes_debug(inputs: dict) -> dict:
-    """
-    Match EXACT model input signatures:
-      - numeric: (None, d_num) float32
-      - categoricals: (None,) tf.string
-    """
-    d_num = len(num_cols_nn)
-    cat_keys = list(cat_cols_nn)
-
-    out = {}
-
-    # numeric
-    xnum = tf.convert_to_tensor(inputs["numeric"], dtype=tf.float32)
-    if xnum.shape.rank != 2 or xnum.shape[-1] != d_num:
-        xnum = tf.reshape(xnum, [-1, d_num])
-    xnum.set_shape([None, d_num])
-    out["numeric"] = xnum
-
-    # categoricals
-    for k in cat_keys:
-        x = tf.convert_to_tensor(inputs[k], dtype=tf.string)
-
-        # force rank-1 (None,)
-        if x.shape.rank == 2 and x.shape[-1] == 1:
-            x = tf.reshape(x, [-1])
-        elif x.shape.rank != 1:
-            x = tf.reshape(x, [-1])
-
-        x.set_shape([None])
-        out[k] = x
-
-    return out
-
-# ==========================================================
-# DEBUG: TANH OUTPUT SATURATION CHECK (paste-once block)
-# Place this AFTER Step 6 (model trained or loaded)
-# and BEFORE any evaluation / plots / permutation importance
-# ==========================================================
-
-# assert "model" in globals() and model is not None, "Model must exist before saturation check"
-# assert "test_inputs_tf" in globals(), "test_inputs_tf must exist"
-
-# # ---- TANH head check (correct): look at z_logit and pred_log1p together ----
-# probe = keras.Model(
-#     inputs=model.inputs,
-#     outputs=[model.get_layer("z_logit").output, model.output]
-# )
-
-# fixed = _force_static_shapes_debug(test_inputs_tf)
-# z_vals, out_vals = probe({k: (v[:4096, :] if k=="numeric" else v[:4096]) for k, v in fixed.items()},
-#                          training=False)
-
-# z_vals = z_vals.numpy().reshape(-1)
-# out_vals = out_vals.numpy().reshape(-1)
-
-# print("\n" + "="*70)
-# print("TANH PROBE (z_logit and output)")
-# print("="*70)
-# print("z_logit min/med/max:", float(np.min(z_vals)), float(np.median(z_vals)), float(np.max(z_vals)))
-# print("z_logit std:", float(np.std(z_vals)))
-# print("|z| > 1:", float(np.mean(np.abs(z_vals) > 1.0))*100, "%")
-# print("|z| > 2:", float(np.mean(np.abs(z_vals) > 2.0))*100, "%")
-# print("|z| > 3:", float(np.mean(np.abs(z_vals) > 3.0))*100, "%")
-# print("out (log1p) min/med/max:", float(np.min(out_vals)), float(np.median(out_vals)), float(np.max(out_vals)))
-# print("out std:", float(np.std(out_vals)))
-# print("="*70 + "\n")
-
-# ==========================================================
-# CONSISTENCY CHECK: three ways to get pred_log
-# - direct model call (no adapters)
-# - model.predict on dict (adapter)
-# - model.predict on tf.data (adapter)
-# Goal: they should have similar std/range
-# ==========================================================
-def _summ(name, arr):
-    arr = np.asarray(arr).reshape(-1).astype("float64")
-    print(
-        f"{name}: n={len(arr)} "
-        f"min/med/max={arr.min():.4f} / {np.median(arr):.4f} / {arr.max():.4f} "
-        f"std={arr.std():.6f}"
-    )
-
-fixed = _force_static_shapes_debug(test_inputs_tf)
-
-# Use a decent slice so it's not just a tiny batch artifact
-NCHK = 8192
-slice_inputs = {k: (v[:NCHK, :] if k == "numeric" else v[:NCHK]) for k, v in fixed.items()}
-
-# (A) DIRECT call (no model.predict adapter)
-pred_direct = model(slice_inputs, training=False).numpy().reshape(-1)
-_summ("pred_direct", pred_direct)
-
-# (B) model.predict on dict
-pred_predict = model.predict(slice_inputs, batch_size=1024, verbose=0).reshape(-1)
-_summ("pred_predict(dict)", pred_predict)
-
-# (C) model.predict via tf.data
-pred_ds = tf.data.Dataset.from_tensor_slices(slice_inputs).batch(1024)
-pred_predict_ds = model.predict(pred_ds, verbose=0).reshape(-1)
-_summ("pred_predict(tf.data)", pred_predict_ds)
-
-# Quick agreement checks
-print("\nmax |direct - predict(dict)|:", float(np.max(np.abs(pred_direct - pred_predict))))
-print("max |direct - predict(ds)|  :", float(np.max(np.abs(pred_direct - pred_predict_ds))))
-
-
-# # ----------------------------------------------------------
-# # 1) Probe the pre-tanh Dense(1) output (z)
-# # ----------------------------------------------------------
-# # Assumes final layers are: Dense(1) -> Lambda(tanh)
-# z_layer = model.get_layer(index=-2)
-
-# probe_model = tf.keras.Model(
-#     inputs=model.inputs,
-#     outputs=z_layer.output
-# )
-
-# # ----------------------------------------------------------
-# # 2) Run on a representative sample
-# # ----------------------------------------------------------
-# N = min(4096, int(test_inputs_tf["numeric"].shape[0]))
-
-# probe_inputs = {
-#     "numeric": test_inputs_tf["numeric"][:N, :],
-#     **{c: test_inputs_tf[c][:N] for c in cat_cols_nn}
-# }
-
-# z_vals = probe_model.predict(
-#     probe_inputs,
-#     batch_size=256,
-#     verbose=0
-# ).reshape(-1).astype("float64")
-
-# # ----------------------------------------------------------
-# # 3) Print saturation diagnostics
-# # ----------------------------------------------------------
-# print("\n" + "=" * 70)
-# print("TANH SATURATION CHECK (pre-activation z)")
-# print("=" * 70)
-
-# print(
-#     "z min / median / max:",
-#     float(z_vals.min()),
-#     float(np.median(z_vals)),
-#     float(z_vals.max())
-# )
-# print("z std:", float(np.std(z_vals)))
-
-# for thr in [1.0, 2.0, 3.0, 4.0]:
-#     pct = 100.0 * np.mean(np.abs(z_vals) > thr)
-#     print(f"|z| > {thr:.1f}: {pct:.1f}%")
-
-# # ----------------------------------------------------------
-# # 4) Optional: inspect tanh output itself
-# # ----------------------------------------------------------
-# if "LOG_CENTER" in globals() and "LOG_SCALE" in globals():
-#     pred_log = model.predict(
-#         probe_inputs,
-#         batch_size=256,
-#         verbose=0
-#     ).reshape(-1).astype("float64")
-
-#     tanh_out = (pred_log - LOG_CENTER) / LOG_SCALE
-
-#     print("\nTANH OUTPUT RANGE")
-#     print(
-#         "tanh min / median / max:",
-#         float(tanh_out.min()),
-#         float(np.median(tanh_out)),
-#         float(tanh_out.max())
-#     )
-#     print(
-#         "fraction |tanh| > 0.95:",
-#         float(np.mean(np.abs(tanh_out) > 0.95))
-#     )
-
-# print("=" * 70 + "\n")
-
-def _pct(x): 
-    return 100.0 * float(x)
-
-print("\n" + "="*70)
-print("KERAS DEBUG SNAPSHOT")
-print("="*70)
-
-# ---- basic state ----
-print("TRAIN_MODE:", TRAIN_MODE)
-print("RETRAIN_KERAS:", RETRAIN_KERAS)
-print("WILL_TRAIN_KERAS:", globals().get("WILL_TRAIN_KERAS", None))
-print("KERAS_RUN_DIR:", globals().get("KERAS_RUN_DIR", None))
-print("latest_path:", globals().get("latest_path", None))
-
-# ---- y-shape sanity (CRITICAL) ----
-print("\n--- y shape sanity ---")
-print("y_train_nn shape:", y_train_nn.shape)
-print("y_val_nn shape:", y_val_nn.shape)
-print("y_test_nn shape:", y_test_nn.shape)
-
-assert y_train_nn.ndim == 2 and y_train_nn.shape[1] == 1, "y_train_nn must be (N, 1)"
-assert y_val_nn.ndim   == 2 and y_val_nn.shape[1]   == 1, "y_val_nn must be (N, 1)"
-assert y_test_nn.ndim  == 2 and y_test_nn.shape[1]  == 1, "y_test_nn must be (N, 1)"
-
-if ("model" not in globals()) or (model is None):
-    print("❌ model is None (training/loading did not produce a model). Stop here.")
-else:
-    # ---- input sanity ----
-    print("\n--- Input dict sanity ---")
-    print("len(num_cols_nn):", len(num_cols_nn))
-    print("len(cat_cols_nn):", len(cat_cols_nn))
-    print("numeric matrix shape:", test_inputs_tf["numeric"].shape)
-    if len(cat_cols_nn) > 0:
-        c0 = cat_cols_nn[0]
-        print("example cat:", c0, "dtype:", test_inputs_tf[c0].dtype, "shape:", test_inputs_tf[c0].shape)
-        print("example cat sample:", test_inputs_tf[c0][:5])
-
-    # ---- model input shapes ----
-    print("\n--- Model inputs ---")
-    for inp in model.inputs:
-        print(" ", inp.name, inp.shape, inp.dtype)
-
-    # ---- target distribution sanity ----
-    print("\n--- y (log1p) sanity ---")
-    print("y_test_nn min/median/max:",
-          float(np.min(y_test_nn)), float(np.median(y_test_nn)), float(np.max(y_test_nn)))
-    print("y_test_nn std:", float(np.std(y_test_nn)))
-
-    # ---- prediction distribution sanity (log) ----
-    # print("\n--- pred_log sanity ---")
-    # pred_log = model.predict(test_inputs_tf, batch_size=KERAS_TUNE["pred_batch"], verbose=0).ravel()
-    # pred_log = np.asarray(pred_log, dtype="float64")
-
-    # print("pred_log min/median/max:",
-    #       float(np.min(pred_log)), float(np.median(pred_log)), float(np.max(pred_log)))
-    # print("pred_log std:", float(np.std(pred_log)))
-
-    print("\n--- pred_log sanity (FULL TEST via tf.data) ---")
-
-    # Build a predict-only dataset from the exact same test_inputs_tf dict
-    # pred_bs = int(KERAS_TUNE.get("pred_batch", 1024))
-    # test_pred_ds = tf.data.Dataset.from_tensor_slices(test_inputs_tf).batch(pred_bs)
-
-    # pred_log = model.predict(test_pred_ds, verbose=0).reshape(-1).astype("float64")
-
-    # true_log = y_test_nn.reshape(-1).astype("float64")
-
-    # print("pred_log min/median/max:",
-    #     float(np.min(pred_log)), float(np.median(pred_log)), float(np.max(pred_log)))
-    # print("pred_log std:", float(np.std(pred_log)))
-
-    # print("true_log std:", float(np.std(true_log)))
-    # print("ratio:", float(np.std(pred_log) / (np.std(true_log) + 1e-12)))
-
-    # --- pred_log sanity (FULL TEST, eager call; avoids predict() + tf.data tracing) ---
-
-    # Force exact static shapes/ranks that match your model inputs
-    fixed_test = _force_static_shapes_debug(test_inputs_tf)  # numeric:(None,d), cats:(None,)
-
-    # Direct forward pass (no model.predict adapter)
-    pred_log = model(fixed_test, training=False).numpy().reshape(-1).astype("float64")
-
-    true_log = y_test_nn.reshape(-1).astype("float64")
-
-    print("pred_log min/median/max:",
-        float(np.min(pred_log)), float(np.median(pred_log)), float(np.max(pred_log)))
-    print("pred_log std:", float(np.std(pred_log)))
-
-    print("true_log std:", float(np.std(true_log)))
-    print("ratio:", float(np.std(pred_log) / (np.std(true_log) + 1e-12)))
-
-    log_mae = float(np.mean(np.abs(pred_log - true_log)))
-    print("log-space MAE:", log_mae)
-
-    # How constant is it?
-    const_ratio = float(np.std(pred_log) / (np.std(y_test_nn) + 1e-12))
-    print("std(pred_log) / std(true_log):", const_ratio,
-          "  (<< 1.0 means near-constant predictions)")
-
-    # ---- quick log-space MAE ----
-    log_mae = float(np.mean(np.abs(pred_log - y_test_nn.astype("float64"))))
-    print("log-space MAE:", log_mae)
-
-    # ---- dollar-space quick sanity (no full metrics, just range) ----
-    pred_dollars = np.expm1(np.clip(pred_log, -5, 20))  # clip to avoid overflow in debug
-    true_dollars = np.expm1(y_test_nn.astype("float64"))
-    print("\n--- $ range sanity ---")
-    print("true $ min/median/max:",
-          float(np.min(true_dollars)), float(np.median(true_dollars)), float(np.max(true_dollars)))
-    print("pred $ min/median/max:",
-          float(np.min(pred_dollars)), float(np.median(pred_dollars)), float(np.max(pred_dollars)))
-
-    # ---- schema/order check against run_info.json if available ----
-    print("\n--- Schema check vs run_info.json ---")
-    run_dir = globals().get("KERAS_RUN_DIR", None)
-    if run_dir is not None:
-        run_info_path = Path(run_dir) / "run_info.json"
-        if run_info_path.exists():
-            info = json.loads(run_info_path.read_text())
-            saved_num = info.get("num_cols", None)
-            saved_cat = info.get("cat_cols", None)
-
-            print("run_info.json found:", run_info_path)
-            print("num cols exact match?", (saved_num == list(num_cols_nn)))
-            print("cat cols exact match?", (saved_cat == list(cat_cols_nn)))
-
-            if saved_num != list(num_cols_nn):
-                # show first mismatch
-                for i, (a, b) in enumerate(zip(saved_num, list(num_cols_nn))):
-                    if a != b:
-                        print("FIRST NUM MISMATCH @", i, "| saved:", a, "| current:", b)
-                        break
-                print("saved_num_len:", len(saved_num), "current_len:", len(num_cols_nn))
-
-            if saved_cat != list(cat_cols_nn):
-                for i, (a, b) in enumerate(zip(saved_cat, list(cat_cols_nn))):
-                    if a != b:
-                        print("FIRST CAT MISMATCH @", i, "| saved:", a, "| current:", b)
-                        break
-                print("saved_cat_len:", len(saved_cat), "current_len:", len(cat_cols_nn))
-        else:
-            print("No run_info.json in KERAS_RUN_DIR (maybe loaded model / older run).")
-    else:
-        print("KERAS_RUN_DIR is None (likely loaded latest or training skipped).")
-
-print("="*70 + "\n")
-
-print("history keys:", list(history.history.keys()))
-print("first/last loss:", history.history["loss"][0], history.history["loss"][-1])
-print("first/last val_loss:", history.history["val_loss"][0], history.history["val_loss"][-1])
-print("best val_loss:", min(history.history["val_loss"]))
-
-# ======================================================================
-# EXTRA DEBUG: Why are predictions near-constant?
-# Put this in the KERAS DEBUG SNAPSHOT cell, AFTER model is trained/loaded
-# and AFTER train_inputs_tf/test_inputs_tf exist, BEFORE evaluation.
-# ======================================================================
-
-# ==========================================================
-# Helper: quick stats (accepts np.ndarray OR tf.Tensor)
-# ==========================================================
-def _quick_stats(name, arr):
-    if isinstance(arr, tf.Tensor):
-        arr = arr.numpy()
-
-    arr = np.asarray(arr)
-
-    print(
-        f"{name}: shape={arr.shape} dtype={arr.dtype} "
-        f"min={np.nanmin(arr):.4f} "
-        f"med={np.nanmedian(arr):.4f} "
-        f"max={np.nanmax(arr):.4f} "
-        f"std={np.nanstd(arr):.6f}"
-    )
-
-
-# ==========================================================
-# Numeric input variance check
-# ==========================================================
-print("\n--- Numeric input variance check (raw numeric matrix) ---")
-
-Xnum_test = test_inputs_tf["numeric"]  # tf.Tensor [N, D]
-
-_quick_stats("test_inputs_tf['numeric']", Xnum_test)
-
-# Per-column std (TF-native)
-col_stds = tf.math.reduce_std(Xnum_test, axis=0)  # shape [D]
-
-# Count near-constant columns
-n_almost_const = int(
-    tf.reduce_sum(tf.cast(col_stds < 1e-6, tf.int32)).numpy()
-)
-
-print(
-    "Numeric cols with std < 1e-6:",
-    n_almost_const,
-    "/",
-    int(Xnum_test.shape[1])
-)
-
-# Smallest 5 stds
-smallest5 = tf.sort(col_stds)[:5].numpy()
-print("Smallest 5 numeric stds:", smallest5)
-
-
-# ==========================================================
-# Categorical OOV rate check
-# ==========================================================
-print("\n--- Categorical OOV rate check (rebuild lookups and count OOV) ---")
-
-oov_rates = {}
-unique_id_counts = {}
-
-# Sample rows for speed
-N = len(X_train_nn)
-rs = np.random.RandomState(42)
-idx = rs.choice(N, size=min(20_000, N), replace=False)
-
-for c in cat_cols_nn:
-    lk = tf.keras.layers.StringLookup(
-        output_mode="int",
-        mask_token=None,
-        num_oov_indices=1,
-    )
-
-    # IMPORTANT: must match model vocab exactly
-    lk.set_vocabulary(LOOKUP_VOCABS[c])
-
-    vals = X_train_nn[c].astype(str).to_numpy()[idx]
-    ids = lk(vals).numpy()
-
-    # With num_oov_indices=1, OOV bucket is index 0
-    oov_rate = float((ids == 0).mean())
-
-    oov_rates[c] = oov_rate
-    unique_id_counts[c] = int(len(np.unique(ids)))
-
-print("OOV rates (train sample):")
-for c in cat_cols_nn:
-    print(
-        f"  {c:20s} "
-        f"oov_rate={oov_rates[c]:.4f}  "
-        f"unique_ids={unique_id_counts[c]}"
-    )
-
-
-# ==========================================================
-# Prediction variance sanity check
-# ==========================================================
-print("\n--- Quick prediction variance on a small batch ---")
-
-sample_inputs = {
-    k: (v[:2048, :] if k == "numeric" else v[:2048])
-    for k, v in test_inputs_tf.items()
-}
-
-pred_log_small = model.predict(
-    sample_inputs,
-    batch_size=256,
-    verbose=0,
-).ravel()
-
-_quick_stats("pred_log_small", pred_log_small)
-
-print("\n--- If pred_log_small std is still ~0, the model is collapsing ---")
-
-print("EVAL model object:", model)
-print("EVAL model name:", getattr(model, "name", None))
-print("EVAL latest_path exists:", latest_path.exists())
-print("EVAL KERAS_RUN_DIR:", KERAS_RUN_DIR)
-
-# confirm head is the one you think
-print("Has z_logit layer?", any(l.name == "z_logit" for l in model.layers))
-print("Output layer name:", model.output_names)
-print("Output tensor:", model.output)
 ```
 
 #### Keras Evaluation 
@@ -3885,91 +2373,15 @@ print("Output tensor:", model.output)
 if ("model" not in globals()) or (model is None):
     print("⚠️ Keras model is not available — skipping evaluation.")
 else:
-    # ----------------------------
-    # Helper: safe predict -> dollars
-    # ----------------------------
-    # def _predict_dollars(inputs: dict) -> np.ndarray:
-    #     pred_log = model.predict(
-    #         inputs,
-    #         batch_size=KERAS_TUNE["pred_batch"],
-    #         verbose=0
-    #     ).ravel()
-
-        # Safety: replace NaN/Inf if something went wrong
-        # pred_log = np.nan_to_num(pred_log, nan=0.0, posinf=15.0, neginf=6.0)
-
-        # # Convert to dollars in float64
-        # return np.expm1(pred_log.astype("float64"))
-
-    def _predict_dollars(inputs: dict) -> np.ndarray:
-        """
-        Predicts price in dollars from a dict of TF tensors / numpy arrays.
-
-        This avoids Keras' model.predict() adapter path (which can trigger:
-        "as_list() is not defined on an unknown TensorShape") by:
-        1) converting inputs to TF tensors
-        2) forcing static shapes for each input
-        3) calling model(...) directly in eager mode
-        """
-        # numeric width must be known
-        d_num = int(len(num_cols_nn)) if ("num_cols_nn" in globals()) else int(inputs["numeric"].shape[1])
-
-        fixed = {}
-
-        # numeric: (N, d_num) float32
-        xnum = tf.convert_to_tensor(inputs["numeric"], dtype=tf.float32)
-        if xnum.shape.rank != 2:
-            xnum = tf.reshape(xnum, [-1, d_num])
-        xnum.set_shape([None, d_num])
-        fixed["numeric"] = xnum
-
-        # # categoricals: (N, 1) tf.string
-        # for k, v in inputs.items():
-        #     if k == "numeric":
-        #         continue
-
-        #     x = tf.convert_to_tensor(v, dtype=tf.string)
-
-        #     # ensure rank-2 column vector
-        #     if x.shape.rank == 1:
-        #         x = tf.expand_dims(x, axis=-1)   # (N,) -> (N,1)
-        #     elif x.shape.rank == 2 and x.shape[-1] != 1:
-        #         # if someone passed (N,) as (N,?) accidentally, coerce to (N,1)
-        #         x = tf.reshape(x, [-1, 1])
-
-        #     x.set_shape([None, 1])
-        #     fixed[k] = x
-
-        # categoricals: (N,) tf.string  (MATCH model input)
-        for k, v in inputs.items():
-            if k == "numeric":
-                continue
-
-            x = tf.convert_to_tensor(v, dtype=tf.string)
-
-            # Ensure rank-1: (N,)
-            if x.shape.rank == 2 and x.shape[-1] == 1:
-                x = tf.reshape(x, [-1])
-            elif x.shape.rank != 1:
-                x = tf.reshape(x, [-1])
-
-            x.set_shape([None])
-            fixed[k] = x
-
-        # Call model directly (avoid model.predict adapter)
-        pred_log = model(fixed, training=False)              # (N,1)
-        pred_log = tf.reshape(pred_log, [-1])               # (N,)
-
-        # back to dollars (model outputs log1p(price))
-        pred_dollars = tf.math.expm1(pred_log)
-
-        return pred_dollars.numpy().astype("float64")
+    def predict_dollars(inputs_tf: dict) -> np.ndarray:
+        pred_log = model.predict(inputs_tf, batch_size=KERAS_CFG["pred_batch"], verbose=0).reshape(-1)
+        return np.expm1(pred_log.astype("float64"))
 
     # ----------------------------
     # TEST metrics (full + clipped)
     # ----------------------------
-    true_test = np.expm1(y_test_nn.astype("float64").ravel())
-    pred_test = _predict_dollars(test_inputs_tf)
+    true_test = np.expm1(y_test_nn.astype("float64"))
+    pred_test = predict_dollars(test_inputs_tf)
 
     keras_test_m = metrics_full_and_clipped(true_test, pred_test, q_low=0.01, q_high=0.99)
     display(metrics_to_df(keras_test_m, "Keras (Test)"))
@@ -3978,11 +2390,12 @@ else:
     # Train+Val metrics (full + clipped)
     # ----------------------------
     X_trainval_nn = pd.concat([X_train_nn, X_val_nn], axis=0)
-    y_trainval_nn = np.vstack([y_train_nn, y_val_nn]) 
-    trainval_inputs = to_input_dict(X_trainval_nn)
+    y_trainval_nn = np.concatenate([y_train_nn, y_val_nn], axis=0)
 
-    true_trainval = np.expm1(y_trainval_nn.astype("float64").ravel())
-    pred_trainval = _predict_dollars(trainval_inputs)
+    trainval_inputs_tf = to_input_dict_tf(to_input_dict_np(X_trainval_nn))
+
+    true_trainval = np.expm1(y_trainval_nn.astype("float64"))
+    pred_trainval = predict_dollars(trainval_inputs_tf)
 
     keras_trainval_m = metrics_full_and_clipped(true_trainval, pred_trainval, q_low=0.01, q_high=0.99)
     display(metrics_to_df(keras_trainval_m, "Keras (Train+Val)"))
@@ -3997,180 +2410,180 @@ else:
     # Permutation importance (per-feature + optional subsample)
     # Robust for TF tensors + Keras predict (forces static shapes)
     # ----------------------------
-    def permutation_importance_keras_per_feature(
-        base_inputs: dict,
-        y_true_dollars: np.ndarray,
-        *,
-        n_repeats: int = 3,
-        seed: int = 42,
-        max_rows: int | None = 20000,
-        include_categoricals: bool = True,
-    ):
-        rs = np.random.RandomState(seed)
+    # def permutation_importance_keras_per_feature(
+    #     base_inputs: dict,
+    #     y_true_dollars: np.ndarray,
+    #     *,
+    #     n_repeats: int = 3,
+    #     seed: int = 42,
+    #     max_rows: int | None = 20000,
+    #     include_categoricals: bool = True,
+    # ):
+    #     rs = np.random.RandomState(seed)
 
-        # Cache expected widths for static shaping (based on the inputs we were given)
-        d_num = int(base_inputs["numeric"].shape[1])  # must be known
-        cat_keys = [k for k in base_inputs.keys() if k != "numeric"]
+    #     # Cache expected widths for static shaping (based on the inputs we were given)
+    #     d_num = int(base_inputs["numeric"].shape[1])  # must be known
+    #     cat_keys = [k for k in base_inputs.keys() if k != "numeric"]
 
-        def _force_static_shapes(inputs: dict) -> dict:
-            """
-            Ensure Keras sees the exact input ranks/shapes the model was built with:
-            - numeric: (None, d_num) float32
-            - each categorical: (None,) string   <-- IMPORTANT (no trailing 1 dim)
-            """
-            out = {}
+    #     def _force_static_shapes(inputs: dict) -> dict:
+    #         """
+    #         Ensure Keras sees the exact input ranks/shapes the model was built with:
+    #         - numeric: (None, d_num) float32
+    #         - each categorical: (None,) string   <-- IMPORTANT (no trailing 1 dim)
+    #         """
+    #         out = {}
 
-            # -----------------------
-            # numeric: (None, d_num)
-            # -----------------------
-            xnum = tf.convert_to_tensor(inputs["numeric"], dtype=tf.float32)
+    #         # -----------------------
+    #         # numeric: (None, d_num)
+    #         # -----------------------
+    #         xnum = tf.convert_to_tensor(inputs["numeric"], dtype=tf.float32)
 
-            # If someone accidentally passed numeric as (N,) or wrong last dim, coerce
-            if xnum.shape.rank == 1:
-                xnum = tf.reshape(xnum, [-1, d_num])
-            elif xnum.shape.rank == 2 and xnum.shape[-1] != d_num:
-                xnum = tf.reshape(xnum, [-1, d_num])
+    #         # If someone accidentally passed numeric as (N,) or wrong last dim, coerce
+    #         if xnum.shape.rank == 1:
+    #             xnum = tf.reshape(xnum, [-1, d_num])
+    #         elif xnum.shape.rank == 2 and xnum.shape[-1] != d_num:
+    #             xnum = tf.reshape(xnum, [-1, d_num])
 
-            xnum.set_shape([None, d_num])
-            out["numeric"] = xnum
+    #         xnum.set_shape([None, d_num])
+    #         out["numeric"] = xnum
 
-            # -----------------------
-            # categoricals: (None,) string
-            # -----------------------
-            for k in cat_keys:
-                x = tf.convert_to_tensor(inputs[k], dtype=tf.string)
+    #         # -----------------------
+    #         # categoricals: (None,) string
+    #         # -----------------------
+    #         for k in cat_keys:
+    #             x = tf.convert_to_tensor(inputs[k], dtype=tf.string)
 
-                # If passed as (N,1), squeeze to (N,)
-                if x.shape.rank == 2 and x.shape[-1] == 1:
-                    x = tf.reshape(x, [-1])
-                # If any other unexpected rank, coerce to (N,)
-                elif x.shape.rank != 1:
-                    x = tf.reshape(x, [-1])
+    #             # If passed as (N,1), squeeze to (N,)
+    #             if x.shape.rank == 2 and x.shape[-1] == 1:
+    #                 x = tf.reshape(x, [-1])
+    #             # If any other unexpected rank, coerce to (N,)
+    #             elif x.shape.rank != 1:
+    #                 x = tf.reshape(x, [-1])
 
-                x.set_shape([None])
-                out[k] = x
+    #             x.set_shape([None])
+    #             out[k] = x
 
-            return out
+    #         return out
 
-        def _gather_rows_tf(inputs: dict, idx_rows: np.ndarray) -> dict:
-            idx_tf = tf.convert_to_tensor(idx_rows, dtype=tf.int32)
-            out = {}
-            for k, v in inputs.items():
-                v = tf.convert_to_tensor(v)
-                out[k] = tf.gather(v, idx_tf, axis=0)
-            return _force_static_shapes(out)
+    #     def _gather_rows_tf(inputs: dict, idx_rows: np.ndarray) -> dict:
+    #         idx_tf = tf.convert_to_tensor(idx_rows, dtype=tf.int32)
+    #         out = {}
+    #         for k, v in inputs.items():
+    #             v = tf.convert_to_tensor(v)
+    #             out[k] = tf.gather(v, idx_tf, axis=0)
+    #         return _force_static_shapes(out)
 
-        # ----------------------------
-        # 0) Subsample rows for speed (optional)
-        # ----------------------------
-        N = int(len(y_true_dollars))
-        if (max_rows is not None) and (N > int(max_rows)):
-            idx_rows = rs.choice(N, size=int(max_rows), replace=False)
-            sub_inputs = _gather_rows_tf(base_inputs, idx_rows)
-            y_sub = y_true_dollars[idx_rows]
-        else:
-            sub_inputs = _force_static_shapes(base_inputs)
-            y_sub = y_true_dollars
+    #     # ----------------------------
+    #     # 0) Subsample rows for speed (optional)
+    #     # ----------------------------
+    #     N = int(len(y_true_dollars))
+    #     if (max_rows is not None) and (N > int(max_rows)):
+    #         idx_rows = rs.choice(N, size=int(max_rows), replace=False)
+    #         sub_inputs = _gather_rows_tf(base_inputs, idx_rows)
+    #         y_sub = y_true_dollars[idx_rows]
+    #     else:
+    #         sub_inputs = _force_static_shapes(base_inputs)
+    #         y_sub = y_true_dollars
 
-        # ----------------------------
-        # 1) Baseline RMSE
-        # ----------------------------
-        base_pred = _predict_dollars(sub_inputs)
-        base_rmse = float(np.sqrt(np.mean((y_sub - base_pred) ** 2)))
+    #     # ----------------------------
+    #     # 1) Baseline RMSE
+    #     # ----------------------------
+    #     base_pred = _predict_dollars(sub_inputs)
+    #     base_rmse = float(np.sqrt(np.mean((y_sub - base_pred) ** 2)))
 
-        rows = []
+    #     rows = []
 
-        # ----------------------------
-        # 2) Numeric per-column importance
-        # ----------------------------
-        Xnum = sub_inputs["numeric"]  # (N, d_num)
-        n_sub = int(Xnum.shape[0]) if Xnum.shape[0] is not None else len(y_sub)
+    #     # ----------------------------
+    #     # 2) Numeric per-column importance
+    #     # ----------------------------
+    #     Xnum = sub_inputs["numeric"]  # (N, d_num)
+    #     n_sub = int(Xnum.shape[0]) if Xnum.shape[0] is not None else len(y_sub)
 
-        if ("num_cols_nn" in globals()) and (len(num_cols_nn) == d_num):
-            num_names = list(num_cols_nn)
-        else:
-            num_names = [f"num_{j}" for j in range(d_num)]
+    #     if ("num_cols_nn" in globals()) and (len(num_cols_nn) == d_num):
+    #         num_names = list(num_cols_nn)
+    #     else:
+    #         num_names = [f"num_{j}" for j in range(d_num)]
 
-        for j in range(d_num):
-            deltas = []
-            for _ in range(int(n_repeats)):
-                idx_perm = rs.permutation(len(y_sub))
-                idx_tf = tf.convert_to_tensor(idx_perm, dtype=tf.int32)
+    #     for j in range(d_num):
+    #         deltas = []
+    #         for _ in range(int(n_repeats)):
+    #             idx_perm = rs.permutation(len(y_sub))
+    #             idx_tf = tf.convert_to_tensor(idx_perm, dtype=tf.int32)
 
-                col_perm = tf.gather(Xnum[:, j], idx_tf)              # (N,)
-                col_perm = tf.expand_dims(col_perm, axis=1)           # (N,1)
+    #             col_perm = tf.gather(Xnum[:, j], idx_tf)              # (N,)
+    #             col_perm = tf.expand_dims(col_perm, axis=1)           # (N,1)
 
-                left  = Xnum[:, :j]                                   # (N, j)
-                right = Xnum[:, j+1:]                                 # (N, d-j-1)
-                Xnum_new = tf.concat([left, col_perm, right], axis=1) # (N, d_num)
-                Xnum_new.set_shape([None, d_num])
+    #             left  = Xnum[:, :j]                                   # (N, j)
+    #             right = Xnum[:, j+1:]                                 # (N, d-j-1)
+    #             Xnum_new = tf.concat([left, col_perm, right], axis=1) # (N, d_num)
+    #             Xnum_new.set_shape([None, d_num])
 
-                pert = dict(sub_inputs)
-                pert["numeric"] = Xnum_new
-                pert = _force_static_shapes(pert)
+    #             pert = dict(sub_inputs)
+    #             pert["numeric"] = Xnum_new
+    #             pert = _force_static_shapes(pert)
 
-                pred = _predict_dollars(pert)
-                rmse = float(np.sqrt(np.mean((y_sub - pred) ** 2)))
-                deltas.append(rmse - base_rmse)
+    #             pred = _predict_dollars(pert)
+    #             rmse = float(np.sqrt(np.mean((y_sub - pred) ** 2)))
+    #             deltas.append(rmse - base_rmse)
 
-            rows.append({
-                "feature": num_names[j],
-                "feature_type": "numeric",
-                "rmse_increase": float(np.mean(deltas)),
-                "rmse_increase_std": float(np.std(deltas)),
-            })
+    #         rows.append({
+    #             "feature": num_names[j],
+    #             "feature_type": "numeric",
+    #             "rmse_increase": float(np.mean(deltas)),
+    #             "rmse_increase_std": float(np.std(deltas)),
+    #         })
 
-        # ----------------------------
-        # 3) Categorical per-key importance (optional)
-        # ----------------------------
-        if include_categoricals:
-            for key in cat_keys:
-                deltas = []
-                Xcat = sub_inputs[key]  # (N,) tf.string   <-- FIXED
+    #     # ----------------------------
+    #     # 3) Categorical per-key importance (optional)
+    #     # ----------------------------
+    #     if include_categoricals:
+    #         for key in cat_keys:
+    #             deltas = []
+    #             Xcat = sub_inputs[key]  # (N,) tf.string   <-- FIXED
 
-                for _ in range(int(n_repeats)):
-                    idx_perm = rs.permutation(len(y_sub))
-                    idx_tf = tf.convert_to_tensor(idx_perm, dtype=tf.int32)
+    #             for _ in range(int(n_repeats)):
+    #                 idx_perm = rs.permutation(len(y_sub))
+    #                 idx_tf = tf.convert_to_tensor(idx_perm, dtype=tf.int32)
 
-                    Xcat_new = tf.gather(Xcat, idx_tf, axis=0)  # (N,)
-                    Xcat_new.set_shape([None])                  # <-- FIXED (no [None,1])
+    #                 Xcat_new = tf.gather(Xcat, idx_tf, axis=0)  # (N,)
+    #                 Xcat_new.set_shape([None])                  # <-- FIXED (no [None,1])
 
-                    pert = dict(sub_inputs)
-                    pert[key] = Xcat_new
-                    pert = _force_static_shapes(pert)
+    #                 pert = dict(sub_inputs)
+    #                 pert[key] = Xcat_new
+    #                 pert = _force_static_shapes(pert)
 
-                    pred = _predict_dollars(pert)
-                    rmse = float(np.sqrt(np.mean((y_sub - pred) ** 2)))
-                    deltas.append(rmse - base_rmse)
+    #                 pred = _predict_dollars(pert)
+    #                 rmse = float(np.sqrt(np.mean((y_sub - pred) ** 2)))
+    #                 deltas.append(rmse - base_rmse)
 
-                rows.append({
-                    "feature": key,
-                    "feature_type": "categorical",
-                    "rmse_increase": float(np.mean(deltas)),
-                    "rmse_increase_std": float(np.std(deltas)),
-                })
+    #             rows.append({
+    #                 "feature": key,
+    #                 "feature_type": "categorical",
+    #                 "rmse_increase": float(np.mean(deltas)),
+    #                 "rmse_increase_std": float(np.std(deltas)),
+    #             })
 
-        df_pi = (
-            pd.DataFrame(rows)
-            .sort_values("rmse_increase", ascending=False)
-            .reset_index(drop=True)
-        )
-        return base_rmse, df_pi
+    #     df_pi = (
+    #         pd.DataFrame(rows)
+    #         .sort_values("rmse_increase", ascending=False)
+    #         .reset_index(drop=True)
+    #     )
+    #     return base_rmse, df_pi
 
-    # ---- Run it ----
-    try:
-        base_rmse_pi, pi_df = permutation_importance_keras_per_feature(
-            test_inputs_tf,
-            true_test,  # must be dollars
-            n_repeats=3,
-            seed=SEED if "SEED" in globals() else 42,
-            max_rows=20000,
-            include_categoricals=True
-        )
-        print(f"Baseline TEST RMSE ($) [subset for PI]: {base_rmse_pi:,.0f}")
-        display(pi_df.head(30))
-    except Exception as e:
-        print("⚠️ Permutation importance failed:", e)
+    # # ---- Run it ----
+    # try:
+    #     base_rmse_pi, pi_df = permutation_importance_keras_per_feature(
+    #         test_inputs_tf,
+    #         true_test,  # must be dollars
+    #         n_repeats=3,
+    #         seed=SEED if "SEED" in globals() else 42,
+    #         max_rows=20000,
+    #         include_categoricals=True
+    #     )
+    #     print(f"Baseline TEST RMSE ($) [subset for PI]: {base_rmse_pi:,.0f}")
+    #     display(pi_df.head(30))
+    # except Exception as e:
+    #     print("⚠️ Permutation importance failed:", e)
 
     # ----------------------------
     # Training curves (if this run trained in-session)
@@ -4546,10 +2959,10 @@ else:
     if ("model" in globals()) and (model is not None) and (("test_inputs_tf" in globals()) or ("test_inputs" in globals())):
         # Prefer tf.data pipeline if available (static shapes + correct string ranks)
         if ("test_inputs_tf" in globals()) and (test_inputs_tf is not None):
-            preds["Keras"] = _predict_dollars(test_inputs_tf)
+            preds["Keras"] = predict_dollars(test_inputs_tf)
         else:
             # fallback (older path) if you still have a numpy/dict input
-            preds["Keras"] = _predict_dollars(test_inputs)
+            preds["Keras"] = predict_dollars(test_inputs)
     else:
         print("ℹ️ Keras model/test_inputs not available — skipping Keras plots.")
 
