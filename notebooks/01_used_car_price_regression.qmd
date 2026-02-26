@@ -1973,7 +1973,7 @@ np.random.seed(SEED)
 # Step -1: Simple Keras config (start stable)
 # ----------------------------
 KERAS_CFG = {
-    "batch_full": 2048,
+    "batch_full": 2048, # 2048 orginally 
     "epochs_full": 80,          # EarlyStopping will stop earlier
     "batch_smoke": 512,
     "epochs_smoke": 3,
@@ -2183,6 +2183,7 @@ def build_baseline_model():
             output_dim=EMBED_DIMS[c],
             name=f"{c}_emb",
         )(ids)  # (N, emb_dim)
+        emb = layers.Dropout(0.20)(emb)
         emb_list.append(emb)
 
     x = layers.Concatenate(name="concat")([x_num] + emb_list)
@@ -2191,24 +2192,22 @@ def build_baseline_model():
     x = layers.Dense(256, kernel_initializer="he_normal")(x)
     x = layers.BatchNormalization()(x)
     x = layers.Activation(tf.keras.activations.silu)(x)
-    x = layers.Dropout(0.30)(x)
+    x = layers.Dropout(0.30)(x) 
 
     x = layers.Dense(128, kernel_initializer="he_normal")(x)
     x = layers.BatchNormalization()(x)
     x = layers.Activation(tf.keras.activations.silu)(x)
-    x = layers.Dropout(0.25)(x)
+    x = layers.Dropout(0.25)(x) 
 
     x = layers.Dense(64, kernel_initializer="he_normal")(x)
     x = layers.BatchNormalization()(x)
     x = layers.Activation(tf.keras.activations.silu)(x)
-    x = layers.Dropout(0.20)(x)
-
+    x = layers.Dropout(0.20)(x) 
     out = layers.Dense(1, name="pred_log1p")(x)
 
     model = keras.Model(inputs={"numeric": numeric_in, **cat_in}, outputs=out, name="tabular_nn_baseline")
 
 # , weight_decay=1e-4,clipnorm=1.0
-# loss="mse",
 
     model.compile(
         optimizer=keras.optimizers.Adam(learning_rate=KERAS_CFG["lr"]),
@@ -2235,14 +2234,15 @@ def _keras_latest_exists() -> bool:
 def _touches_latest() -> bool:
     return TRAIN_MODE == "full"
 
-def make_callbacks_min(train_mode: str):
+def make_callbacks_rlrop(train_mode: str):
     ES_PAT = KERAS_CFG["es_patience_smoke"] if train_mode == "smoke" else KERAS_CFG["es_patience_full"]
+    RL_PAT = KERAS_CFG["rlrop_patience_smoke"] if train_mode == "smoke" else KERAS_CFG["rlrop_patience_full"]
     return [
-        # keras.callbacks.ModelCheckpoint(
-        #     filepath=best_weights_path,
+        # keras.callbacks.ReduceLROnPlateau(
         #     monitor="val_loss",
-        #     save_best_only=True,
-        #     save_weights_only=True,
+        #     factor=KERAS_CFG["rlrop_factor"],
+        #     patience=RL_PAT,
+        #     min_lr=KERAS_CFG["min_lr"],
         #     verbose=0,
         # ),
         keras.callbacks.EarlyStopping(
@@ -2349,7 +2349,7 @@ else:
         epochs=EPOCHS,
         batch_size=min(int(BATCH), int(len(y_train_run))),  # safety if smoke tiny
         verbose=0,
-        callbacks=make_callbacks_min(TRAIN_MODE),
+        callbacks=make_callbacks_rlrop(TRAIN_MODE),
     )
 
     # restore best weights
