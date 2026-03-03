@@ -1970,27 +1970,45 @@ np.random.seed(SEED)
 
 ```{python}
 # ----------------------------
-# Step -1: Simple Keras config (start stable)
+# Step -1: Config
 # ----------------------------
-KERAS_CFG = {
-    "batch_full": 2048, # 2048 orginally 
-    "epochs_full": 80,          # EarlyStopping will stop earlier
+FT_CFG = {
+    # training
+    "batch_full": 2048,
+    "epochs_full": 120,
     "batch_smoke": 512,
-    "epochs_smoke": 3,
+    "epochs_smoke": 5,
 
-    "es_patience_full": 8,
+    # early stopping
+    "es_patience_full": 10,
     "es_patience_smoke": 3,
 
-    "rlrop_patience_full": 3,
-    "rlrop_patience_smoke": 1,
-    "rlrop_factor": 0.5,
-    "min_lr": 1e-6,
+    # optimization
+    "lr": 2e-4,              # base LR (peak after warmup)
+    "min_lr": 1e-6,          # floor for cosine tail
+    "weight_decay": 0.0,
+    "clipnorm": 1.0,
+    "huber_delta": 2.0,
 
+    # transformer
+    "d_token": 96,
+    "n_blocks": 3,
+    "n_heads": 8,
+    "attn_dropout": 0.10,
+    "ff_dropout": 0.15,
+    "resid_dropout": 0.05,
+    "ff_mult": 4,            # FFN hidden = ff_mult * d_token
+
+    # embedding handling
+    "embed_dropout": 0.05,
+
+    # warmup
+    "warmup_frac": 0.10,     # 10% of total steps
+
+    # prediction
     "pred_batch": 4096,
-    "lr": 1e-3,
-    # "lr": 3e-4,
 
-    # optional smoke subsample (stable and simple)
+    # optional smoke subsample 
     "smoke_subsample": False,
     "smoke_train_n": 15000,
     "smoke_val_n": 5000,
@@ -1999,7 +2017,7 @@ KERAS_CFG = {
 
 ```{python}
 # ----------------------------
-# Step 1: Define feature columns (base)
+# Step 1: Define feature columns 
 # ----------------------------
 NUM_COLS_BASE = [
     "mileage", "mpg_avg", "price_drop", "seller_rating", "driver_rating",
@@ -2016,17 +2034,42 @@ CAT_COLS_BASE = [
 num_cols_nn = [c for c in NUM_COLS_BASE if c in X_train.columns]
 cat_cols_nn = [c for c in CAT_COLS_BASE if c in X_train.columns]
 
-print("Numeric cols:", len(num_cols_nn))
-print("Categorical cols:", len(cat_cols_nn))
+print("Numeric cols:", len(num_cols_nn), num_cols_nn)
+print("Categorical cols:", len(cat_cols_nn), cat_cols_nn)
+```
+
+#### Keras Model Preprossesing 
+```{python}
+# ----------------------------
+# Paths 
+# ----------------------------
+KERAS_DIR = MODEL_DIR / "keras"
+KERAS_DIR.mkdir(parents=True, exist_ok=True)
+KERAS_RUNS_DIR = KERAS_DIR / "runs"
+KERAS_RUNS_DIR.mkdir(parents=True, exist_ok=True)
+latest_path = KERAS_DIR / "keras_model.keras"  # "latest" pointer
+
+def _keras_latest_exists() -> bool:
+    return latest_path.exists()
+
+def _touches_latest() -> bool:
+    return TRAIN_MODE == "full"
+
+WILL_TRAIN_KERAS = (
+    (TRAIN_MODE == "smoke") or
+    (TRAIN_MODE == "full" and (RETRAIN_KERAS or (not latest_path.exists())))
+)
+
+print("FT-Transformer WILL_TRAIN_KERAS =", WILL_TRAIN_KERAS, "| latest exists =", latest_path.exists())
 
 # ----------------------------
-# Step 2: Prepare train/val/test (NN copies)
+# Step 2: Prepare train/val/test (NN copies) + imputations
 # ----------------------------
 X_train_nn = X_train.copy()
 X_val_nn   = X_val.copy()
 X_test_nn  = X_test.copy()
 
-# Add missing indicators (optional but helpful)
+# Add missing indicators 
 missing_indicator_cols = []
 for col in ["engine_liters", "engine_cylinders"]:
     if col in X_train_nn.columns:
@@ -2050,57 +2093,30 @@ for c in cat_cols_nn:
         df_[c] = df_[c].fillna("unknown").astype(str)
 
 # Targets (already log1p)
-# IMPORTANT: keep as (N,) for simplicity
 y_train_nn = y_train.to_numpy().astype("float32")
 y_val_nn   = y_val.to_numpy().astype("float32")
 y_test_nn  = y_test.to_numpy().astype("float32")
 
 print("Rows:", {"train": len(X_train_nn), "val": len(X_val_nn), "test": len(X_test_nn)})
 print("NN numeric cols:", len(num_cols_nn), "| NN cat cols:", len(cat_cols_nn))
-```
 
-#### Keras Model Preprossesing 
-```{python}
 # ----------------------------
-# Step 3: Build preprocessing layers
+# Step 3: Adapt preprocessing layers 
+# ----------------------------
 # - Normalization for numeric
-# - StringLookup + Embedding per categorical feature
-# ----------------------------
-
-def suggest_embed_dim(vocab_size: int) -> int:
-    dim = int(np.ceil(np.log2(vocab_size + 1) * 2))
-    return int(np.clip(dim, 8, 50))
-
-# Decide paths
-KERAS_DIR = MODEL_DIR / "keras"
-KERAS_DIR.mkdir(parents=True, exist_ok=True)
-KERAS_RUNS_DIR = KERAS_DIR / "runs"
-KERAS_RUNS_DIR.mkdir(parents=True, exist_ok=True)
-
-latest_path = KERAS_DIR / "keras_model.keras"  # "latest" pointer
-
-WILL_TRAIN_KERAS = (
-    (TRAIN_MODE == "smoke") or
-    (TRAIN_MODE == "full" and (RETRAIN_KERAS or (not latest_path.exists())))
-)
-
-print("WILL_TRAIN_KERAS =", WILL_TRAIN_KERAS, "| latest exists =", latest_path.exists())
-
+# - StringLookup vocab per categorical
 NUM_NORM_WEIGHTS = None
 LOOKUP_VOCABS = None
-EMBED_DIMS = None
+VOCAB_SIZES = None
 
 if WILL_TRAIN_KERAS:
-    # Numeric normalization
+    # Numeric normalization (train-only)
     num_norm = layers.Normalization(name="num_norm")
     num_norm.adapt(X_train_nn[num_cols_nn].astype("float32").to_numpy())
     NUM_NORM_WEIGHTS = num_norm.get_weights()
 
-    # Categoricals
     LOOKUP_VOCABS = {}
-    EMBED_DIMS = {}
-    vocab_sizes = {}
-
+    VOCAB_SIZES = {}
     for c in cat_cols_nn:
         lk = layers.StringLookup(
             output_mode="int",
@@ -2111,13 +2127,7 @@ if WILL_TRAIN_KERAS:
         lk.adapt(X_train_nn[c].to_numpy(dtype=str))
         vocab = lk.get_vocabulary()
         LOOKUP_VOCABS[c] = vocab
-        vs = len(vocab)
-        vocab_sizes[c] = vs
-        EMBED_DIMS[c] = suggest_embed_dim(vs)
-
-    print("Embedding plan:")
-    for c in cat_cols_nn:
-        print(f"  {c:20s} vocab={vocab_sizes[c]:6d}  emb_dim={EMBED_DIMS[c]:2d}")
+        VOCAB_SIZES[c] = int(len(vocab))
 else:
     print("⏭️ Skipping adapt — will load existing model.")
 ```
@@ -2125,49 +2135,164 @@ else:
 #### Keras Model Building 
 ```{python}
 # ----------------------------
-# Step 4: Convert pandas -> Keras-friendly input dicts
+# Step 4: Convert pandas -> Keras-friendly input dicts 
 # ----------------------------
 def to_input_dict_np(Xdf: pd.DataFrame) -> dict:
-    """
-    numeric: (N, D) float32
-    categoricals: (N,) python strings
-    """
     out = {"numeric": Xdf[num_cols_nn].to_numpy(dtype=np.float32, copy=True)}
     for c in cat_cols_nn:
         out[c] = Xdf[c].astype(str).to_numpy(copy=False)  # (N,)
     return out
 
 def to_input_dict_tf(inputs_np: dict) -> dict:
-    """
-    numeric -> tf.float32 (N, D)
-    cats -> tf.string (N,)  IMPORTANT: rank-1
-    """
     out = {"numeric": tf.convert_to_tensor(inputs_np["numeric"], dtype=tf.float32)}
     for c in cat_cols_nn:
-        out[c] = tf.convert_to_tensor(inputs_np[c].tolist(), dtype=tf.string)  # (N,)
+        out[c] = tf.convert_to_tensor(inputs_np[c].astype(str), dtype=tf.string)
     return out
 
 train_inputs_tf = to_input_dict_tf(to_input_dict_np(X_train_nn))
 val_inputs_tf   = to_input_dict_tf(to_input_dict_np(X_val_nn))
 test_inputs_tf  = to_input_dict_tf(to_input_dict_np(X_test_nn))
 
+# ==========================================================
+# Dollar RMSE metric
+# ==========================================================
+
+Y_LOG_MIN = float(np.min(y_train_nn))
+Y_LOG_MAX = float(np.max(y_train_nn))
+# optional pad
+Y_LOG_MIN -= 0.5
+Y_LOG_MAX += 0.5
+
+@tf.keras.utils.register_keras_serializable()
+class RMSEDollars(tf.keras.metrics.Metric):
+    def __init__(self, y_log_min, y_log_max, name="rmse_dollars", **kwargs):
+        super().__init__(name=name, **kwargs)
+        self.y_log_min = float(y_log_min)
+        self.y_log_max = float(y_log_max)
+        self.sse = self.add_weight(name="sse", initializer="zeros", dtype=tf.float64)
+        self.n   = self.add_weight(name="n", initializer="zeros", dtype=tf.float64)
+
+    def update_state(self, y_true_log, y_pred_log, sample_weight=None):
+        y_true_log = tf.cast(y_true_log, tf.float64)
+        y_pred_log = tf.cast(y_pred_log, tf.float64)
+
+        # critical: prevent expm1 overflow
+        y_true_log = tf.clip_by_value(y_true_log, self.y_log_min, self.y_log_max)
+        y_pred_log = tf.clip_by_value(y_pred_log, self.y_log_min, self.y_log_max)
+
+        y_true = tf.math.expm1(y_true_log)
+        y_pred = tf.math.expm1(y_pred_log)
+
+        err = y_true - y_pred
+        sq = tf.square(err)
+
+        if sample_weight is not None:
+            w = tf.cast(sample_weight, tf.float64)
+            sq = sq * w
+            self.n.assign_add(tf.reduce_sum(w))
+        else:
+            self.n.assign_add(tf.cast(tf.size(sq), tf.float64))
+
+        self.sse.assign_add(tf.reduce_sum(sq))
+
+    def result(self):
+        return tf.sqrt(self.sse / tf.maximum(self.n, 1.0))
+
+    def reset_state(self):
+        self.sse.assign(0.0)
+        self.n.assign(0.0)
+
+    def get_config(self):
+        return {"y_log_min": self.y_log_min, "y_log_max": self.y_log_max, **super().get_config()}
+
+# ==========================================================
+# Warmup + Cosine LR schedule
+# ==========================================================
+@tf.keras.utils.register_keras_serializable(package="erin")
+class WarmupCosine(tf.keras.optimizers.schedules.LearningRateSchedule):
+    def __init__(self, base_lr, warmup_steps, total_steps, min_lr=1e-6, name=None):
+        super().__init__()
+        self.base_lr = float(base_lr)
+        self.warmup_steps = int(warmup_steps)
+        self.total_steps = int(total_steps)
+        self.min_lr = float(min_lr)
+        self.name = name
+
+    def __call__(self, step):
+        step = tf.cast(step, tf.float32)
+        warmup_steps = tf.cast(self.warmup_steps, tf.float32)
+        total_steps = tf.cast(self.total_steps, tf.float32)
+
+        warmup_lr = self.base_lr * (step / tf.maximum(1.0, warmup_steps))
+
+        progress = (step - warmup_steps) / tf.maximum(1.0, (total_steps - warmup_steps))
+        progress = tf.clip_by_value(progress, 0.0, 1.0)
+
+        cosine_lr = self.min_lr + 0.5 * (self.base_lr - self.min_lr) * (
+            1.0 + tf.cos(np.pi * progress)
+        )
+
+        return tf.where(step < warmup_steps, warmup_lr, cosine_lr)
+
+    def get_config(self):
+        return {
+            "base_lr": self.base_lr,
+            "warmup_steps": self.warmup_steps,
+            "total_steps": self.total_steps,
+            "min_lr": self.min_lr,
+            "name": self.name,
+        }
+
+    @classmethod
+    def from_config(cls, config):
+        return cls(**config)
+
 # ----------------------------
-# Step 5: Model builder 
+# Step 5: FT-Transformer blocks + model builder
 # ----------------------------
-def build_baseline_model():
+def _ffn(x, d_token: int, ff_mult: int, dropout: float):
+    d_hidden = int(d_token * ff_mult)
+    x2 = layers.Dense(d_hidden, activation=tf.keras.activations.gelu)(x)
+    x2 = layers.Dropout(dropout)(x2)
+    x2 = layers.Dense(d_token)(x2)
+    return x2
+
+def _transformer_block(x, *, d_token, n_heads, attn_dropout, ff_dropout, resid_dropout):
+    # PreNorm attention
+    xn = layers.LayerNormalization()(x)
+    attn = layers.MultiHeadAttention(
+        num_heads=int(n_heads),
+        key_dim=int(d_token // n_heads),
+        dropout=float(attn_dropout),
+    )(xn, xn)
+    attn = layers.Dropout(float(resid_dropout))(attn)
+    x = layers.Add()([x, attn])
+
+    # PreNorm FFN
+    xn = layers.LayerNormalization()(x)
+    ff = _ffn(xn, int(d_token), int(FT_CFG["ff_mult"]), float(ff_dropout))
+    ff = layers.Dropout(float(resid_dropout))(ff)
+    x = layers.Add()([x, ff])
+    return x
+
+def build_ft_transformer_model(lr_schedule):
     # Inputs
     numeric_in = keras.Input(shape=(len(num_cols_nn),), name="numeric", dtype=tf.float32)
     cat_in = {c: keras.Input(shape=(), name=c, dtype=tf.string) for c in cat_cols_nn}
 
-    # Fresh preprocessing layers (re-built from frozen state)
+    # Frozen numeric normalization
     num_norm_local = layers.Normalization(name="num_norm")
     num_norm_local.build((None, len(num_cols_nn)))
     num_norm_local.set_weights(NUM_NORM_WEIGHTS)
 
-    x_num = num_norm_local(numeric_in)
+    x_num = num_norm_local(numeric_in)  # (N, D_num)
 
-    # Cat lookups + embeddings (each embedding output is (N, emb_dim))
-    emb_list = []
+    # Project numeric vector to a single token (N, 1, d_token)
+    num_token = layers.Dense(int(FT_CFG["d_token"]), name="num_token_proj")(x_num)
+    num_token = layers.Reshape((1, int(FT_CFG["d_token"])))(num_token)
+
+    # Categorical tokens: one token per categorical feature
+    cat_tokens = []
     for c in cat_cols_nn:
         lk = layers.StringLookup(
             output_mode="int",
@@ -2180,39 +2305,59 @@ def build_baseline_model():
         ids = lk(cat_in[c])  # (N,)
         emb = layers.Embedding(
             input_dim=lk.vocabulary_size(),
-            output_dim=EMBED_DIMS[c],
-            name=f"{c}_emb",
-        )(ids)  # (N, emb_dim)
-        emb = layers.Dropout(0.20)(emb)
-        emb_list.append(emb)
+            output_dim=int(FT_CFG["d_token"]),
+            name=f"{c}_emb_token",
+        )(ids)  # (N, d_token)
 
-    x = layers.Concatenate(name="concat")([x_num] + emb_list)
+        emb = layers.Dropout(float(FT_CFG["embed_dropout"]))(emb)
+        emb = layers.Reshape((1, int(FT_CFG["d_token"])))(emb)  # (N,1,d_token)
+        cat_tokens.append(emb)
 
-    # Dense stack (same spirit as your working model)
-    x = layers.Dense(256, kernel_initializer="he_normal")(x)
-    x = layers.BatchNormalization()(x)
-    x = layers.Activation(tf.keras.activations.silu)(x)
-    x = layers.Dropout(0.30)(x) 
+    # Token sequence: [num_token] + cat_tokens => (N, T, d_token)
+    x = layers.Concatenate(axis=1, name="token_concat")([num_token] + cat_tokens)
 
-    x = layers.Dense(128, kernel_initializer="he_normal")(x)
-    x = layers.BatchNormalization()(x)
-    x = layers.Activation(tf.keras.activations.silu)(x)
-    x = layers.Dropout(0.25)(x) 
+    # Transformer blocks
+    for i in range(int(FT_CFG["n_blocks"])):
+        x = _transformer_block(
+            x,
+            d_token=int(FT_CFG["d_token"]),
+            n_heads=int(FT_CFG["n_heads"]),
+            attn_dropout=float(FT_CFG["attn_dropout"]),
+            ff_dropout=float(FT_CFG["ff_dropout"]),
+            resid_dropout=float(FT_CFG["resid_dropout"]),
+        )
 
-    x = layers.Dense(64, kernel_initializer="he_normal")(x)
-    x = layers.BatchNormalization()(x)
-    x = layers.Activation(tf.keras.activations.silu)(x)
-    x = layers.Dropout(0.20)(x) 
-    out = layers.Dense(1, name="pred_log1p")(x)
+    # Pool tokens (mean pooling)
+    x = layers.LayerNormalization(name="final_ln")(x)
+    x = layers.GlobalAveragePooling1D(name="token_mean_pool")(x)  # (N, d_token)
 
-    model = keras.Model(inputs={"numeric": numeric_in, **cat_in}, outputs=out, name="tabular_nn_baseline")
+    # Head
+    x = layers.Dense(int(FT_CFG["d_token"]), activation=tf.keras.activations.gelu)(x)
+    x = layers.Dropout(0.10)(x)
+    # initialize predictions near the training median (log1p space)
+    y0 = float(np.median(y_train_nn)) 
 
-# , weight_decay=1e-4,clipnorm=1.0
+    out = layers.Dense(
+        1,
+        bias_initializer=tf.keras.initializers.Constant(y0),
+        name="pred_log1p",
+    )(x)
+
+    model = keras.Model(inputs={"numeric": numeric_in, **cat_in}, outputs=out, name="ft_transformer_reg")
+
+    opt = keras.optimizers.AdamW(
+        learning_rate=lr_schedule,
+        weight_decay=float(FT_CFG["weight_decay"]),
+        clipnorm=float(FT_CFG["clipnorm"]),
+    )
 
     model.compile(
-        optimizer=keras.optimizers.Adam(learning_rate=KERAS_CFG["lr"]),
-        loss=keras.losses.Huber(delta=2.0),
-        metrics=[keras.metrics.RootMeanSquaredError(name="rmse_log")],
+        optimizer=opt,
+        loss=keras.losses.Huber(delta=float(FT_CFG["huber_delta"])),
+        metrics=[
+            keras.metrics.RootMeanSquaredError(name="rmse_log"),
+            RMSEDollars(Y_LOG_MIN, Y_LOG_MAX, name="rmse_dollars"),
+        ],
     )
     return model
 ```
@@ -2220,53 +2365,46 @@ def build_baseline_model():
 #### Keras Model Training 
 ```{python}
 # ----------------------------
-# Step 6: Train or Load + Tuning (Hyperband -> Bayesian)
+# Step 6: Train or Load 
 # ----------------------------
-
 history = None
 KERAS_RUN_DIR = None
 model = None
 
-# convenience
-def _keras_latest_exists() -> bool:
-    return latest_path.exists()
-
-def _touches_latest() -> bool:
-    return TRAIN_MODE == "full"
-
-def make_callbacks_rlrop(train_mode: str):
-    ES_PAT = KERAS_CFG["es_patience_smoke"] if train_mode == "smoke" else KERAS_CFG["es_patience_full"]
-    RL_PAT = KERAS_CFG["rlrop_patience_smoke"] if train_mode == "smoke" else KERAS_CFG["rlrop_patience_full"]
+def make_callbacks(train_mode: str):
+    ES_PAT = FT_CFG["es_patience_smoke"] if train_mode == "smoke" else FT_CFG["es_patience_full"]
     return [
-        # keras.callbacks.ReduceLROnPlateau(
-        #     monitor="val_loss",
-        #     factor=KERAS_CFG["rlrop_factor"],
-        #     patience=RL_PAT,
-        #     min_lr=KERAS_CFG["min_lr"],
-        #     verbose=0,
-        # ),
         keras.callbacks.EarlyStopping(
-            monitor="val_loss",
-            patience=ES_PAT,
+            monitor="val_loss",  # <-- dollars metric
+            mode="min",
+            patience=int(ES_PAT),
             restore_best_weights=True,
         ),
     ]
 
-# 1) SKIP: never train; load latest if it exists
+# 1) SKIP
 if TRAIN_MODE == "skip":
     if _keras_latest_exists():
         print("✅ TRAIN_MODE='skip' — loading latest Keras model:\n ", latest_path)
-        model = keras.models.load_model(latest_path, compile=False)
+        model = keras.models.load_model(
+            latest_path,
+            compile=False,
+            custom_objects={"RMSEDollars": RMSEDollars, "WarmupCosine": WarmupCosine}
+        )
     else:
         print("⏭️ TRAIN_MODE='skip' — no latest Keras model found, skipping.")
         model = None
 
-# 2) FULL + no retrain: load latest if it exists
+# 2) FULL + no retrain
 elif (TRAIN_MODE == "full") and _keras_latest_exists() and (not RETRAIN_KERAS):
     print("✅ Loading existing Keras latest model (RETRAIN_KERAS=False, TRAIN_MODE='full'):\n ", latest_path)
-    model = keras.models.load_model(latest_path, compile=False)
+    model = keras.models.load_model(
+        latest_path,
+        compile=False,
+        custom_objects={"RMSEDollars": RMSEDollars, "WarmupCosine": WarmupCosine}
+    )
 
-# 3) Otherwise: TRAIN (smoke always trains; full trains if retrain or missing latest)
+# 3) Otherwise: TRAIN
 else:
     if not WILL_TRAIN_KERAS:
         raise RuntimeError(
@@ -2274,17 +2412,14 @@ else:
             "Check WILL_TRAIN_KERAS logic vs TRAIN_MODE/RETRAIN_KERAS/latest_path."
         )
 
-    # ----------------------------
-    # Mode-specific knobs
-    # ----------------------------
-    BATCH  = KERAS_CFG["batch_smoke"] if TRAIN_MODE == "smoke" else KERAS_CFG["batch_full"]
-    EPOCHS = KERAS_CFG["epochs_smoke"] if TRAIN_MODE == "smoke" else KERAS_CFG["epochs_full"]
+    BATCH  = FT_CFG["batch_smoke"] if TRAIN_MODE == "smoke" else FT_CFG["batch_full"]
+    EPOCHS = FT_CFG["epochs_smoke"] if TRAIN_MODE == "smoke" else FT_CFG["epochs_full"]
 
-    # optional smoke subsample (stable)
-    if TRAIN_MODE == "smoke" and KERAS_CFG.get("smoke_subsample", False):
+    # Optional smoke subsample
+    if TRAIN_MODE == "smoke" and FT_CFG.get("smoke_subsample", False):
         rs = np.random.RandomState(SEED)
-        ntr = min(int(KERAS_CFG["smoke_train_n"]), len(y_train_nn))
-        nva = min(int(KERAS_CFG["smoke_val_n"]), len(y_val_nn))
+        ntr = min(int(FT_CFG["smoke_train_n"]), len(y_train_nn))
+        nva = min(int(FT_CFG["smoke_val_n"]), len(y_val_nn))
 
         idx_tr = rs.choice(len(y_train_nn), size=ntr, replace=False)
         idx_va = rs.choice(len(y_val_nn), size=nva, replace=False)
@@ -2298,17 +2433,14 @@ else:
         train_inputs_run, val_inputs_run = train_inputs_tf, val_inputs_tf
         y_train_run, y_val_run = y_train_nn, y_val_nn
 
-    # ----------------------------
-    # Create run folder + paths
-    # ----------------------------
+    # Run folder
     run_ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     KERAS_RUN_DIR = KERAS_RUNS_DIR / run_dir_name(run_ts, TRAIN_MODE)
     KERAS_RUN_DIR.mkdir(parents=True, exist_ok=True)
 
-    best_weights_path = str(KERAS_RUN_DIR / "best.weights.h5")
     versioned_path = KERAS_RUN_DIR / "keras_model.keras"
 
-    # write run_info (matches your style)
+    # Run info
     run_info = {
         "run_ts": run_ts,
         "train_mode": TRAIN_MODE,
@@ -2318,11 +2450,11 @@ else:
         "val_rows": int(len(y_val_run)),
         "num_cols": list(num_cols_nn),
         "cat_cols": list(cat_cols_nn),
-        "keras_cfg": dict(KERAS_CFG),
+        "ft_cfg": dict(FT_CFG),
+        "note": "FT-Transformer with WarmupCosine LR schedule and RMSE($) metric for early stopping",
     }
     atomic_write_json(KERAS_RUN_DIR / "run_info.json", run_info)
 
-    # keep the imputation medians used
     atomic_write_json(
         KERAS_RUN_DIR / "train_medians.json",
         {k: float(v) for k, v in train_medians.to_dict().items()}
@@ -2334,34 +2466,53 @@ else:
             b"This is a smoke test run. Do not use as production/latest.\n"
         )
 
-    # ----------------------------
-    # Build + train
-    # ----------------------------
+    # Clear session
     tf.keras.backend.clear_session()
     gc.collect()
 
-    model = build_baseline_model()
+    # Warmup + cosine schedule: compute steps from data
+    batch_eff = min(int(BATCH), int(len(y_train_run)))
+    steps_per_epoch = int(np.ceil(len(y_train_run) / batch_eff))
+    total_steps = int(steps_per_epoch * int(EPOCHS))
+    warmup_steps = max(1, int(float(FT_CFG["warmup_frac"]) * total_steps))
 
-    print(f"🚆 Training Keras | mode={TRAIN_MODE} | epochs={EPOCHS} | batch={BATCH}")
+    lr_schedule = WarmupCosine(
+        base_lr=float(FT_CFG["lr"]),
+        warmup_steps=warmup_steps,
+        total_steps=total_steps,
+        min_lr=float(FT_CFG["min_lr"]),
+    )
+
+    model = build_ft_transformer_model(lr_schedule)
+
+    print(
+        f"🚆 Training FT-Transformer | mode={TRAIN_MODE} | epochs={EPOCHS} | batch={batch_eff} "
+        f"| steps/epoch={steps_per_epoch} | warmup_steps={warmup_steps} | total_steps={total_steps}"
+    )
+
+    print("Initial prediction check:")
+    tmp_pred = model.predict(train_inputs_run, batch_size=1024)[:5]
+    print(tmp_pred)
+
+    tmp = model.predict(train_inputs_run, batch_size=2048, verbose=0).reshape(-1)
+    print("pred_log1p: min/median/max =", float(tmp.min()), float(np.median(tmp)), float(tmp.max()))
+    print("% at 0 floor =", float(np.mean(tmp <= 1e-12)) * 100, "%")
+    print("y_train_nn: min/median/max =", float(y_train_run.min()), float(np.median(y_train_run)), float(y_train_run.max()))
+
     history = model.fit(
         train_inputs_run, y_train_run,
         validation_data=(val_inputs_run, y_val_run),
-        epochs=EPOCHS,
-        batch_size=min(int(BATCH), int(len(y_train_run))),  # safety if smoke tiny
+        epochs=int(EPOCHS),
+        batch_size=batch_eff,
         verbose=0,
-        callbacks=make_callbacks_rlrop(TRAIN_MODE),
+        callbacks=make_callbacks(TRAIN_MODE),
     )
 
-    # restore best weights
-    if os.path.exists(best_weights_path):
-        model.load_weights(best_weights_path)
-        print("✅ Loaded best weights:", best_weights_path)
-
-    # save versioned always
+    # Save versioned always
     model.save(versioned_path, include_optimizer=False)
     print("💾 Saved versioned model:", versioned_path)
 
-    # update latest only for FULL
+    # Update latest only for FULL
     if _touches_latest():
         model.save(latest_path, include_optimizer=False)
         print("✅ Updated latest model:", latest_path)
@@ -2371,54 +2522,41 @@ else:
 
 #### Keras Evaluation 
 ```{python}
-# ==========================================================
-# Keras Model Evaluation
-# ==========================================================
 # ----------------------------
-# Step 7: Evaluate (dollars) with full + clipped
-# + Permutation importance (per-feature + optional subsample)
-# + Training curves (if history exists)
-# Ensures globals for metrics writer cell are set.
+# Step 7: Evaluation (dollars) 
 # ----------------------------
-
 if ("model" not in globals()) or (model is None):
     print("⚠️ Keras model is not available — skipping evaluation.")
 else:
     def predict_dollars(inputs_tf: dict) -> np.ndarray:
-        pred_log = model.predict(inputs_tf, batch_size=KERAS_CFG["pred_batch"], verbose=0).reshape(-1)
+        pred_log = model.predict(inputs_tf, batch_size=int(FT_CFG["pred_batch"]), verbose=0).reshape(-1)
         return np.expm1(pred_log.astype("float64"))
 
     # ----------------------------
     # TEST metrics (full + clipped)
-    # ---------------------------- 
-
+    # ----------------------------
     true_test = np.expm1(y_test_nn.astype("float64"))
     pred_test = predict_dollars(test_inputs_tf)
 
     keras_test_m = metrics_full_and_clipped(true_test, pred_test, q_low=0.01, q_high=0.99)
-    display(metrics_to_df(keras_test_m, "Keras (Test)"))
+    display(metrics_to_df(keras_test_m, "FT-Transformer (Test)"))
 
     # ----------------------------
     # Train+Val metrics (full + clipped)
     # ----------------------------
     X_trainval_nn = pd.concat([X_train_nn, X_val_nn], axis=0)
     y_trainval_nn = np.concatenate([y_train_nn, y_val_nn], axis=0)
-
     trainval_inputs_tf = to_input_dict_tf(to_input_dict_np(X_trainval_nn))
 
     true_trainval = np.expm1(y_trainval_nn.astype("float64"))
     pred_trainval = predict_dollars(trainval_inputs_tf)
 
     keras_trainval_m = metrics_full_and_clipped(true_trainval, pred_trainval, q_low=0.01, q_high=0.99)
-    display(metrics_to_df(keras_trainval_m, "Keras (Train+Val)"))
-
-    # ----------------------------
-    # Quick Check
-    # ----------------------------
+    display(metrics_to_df(keras_trainval_m, "FT-Transformer (Train+Val)"))
 
     print(true_trainval.shape, pred_trainval.shape, true_test.shape, pred_test.shape)
 
-    # Globals for your metrics
+    # Globals for metrics writer block 
     keras_test_full = keras_test_m["full"]
     keras_test_clipped = keras_test_m["clipped"]
     keras_trainval_full = keras_trainval_m["full"]
@@ -2608,24 +2746,37 @@ else:
     # ----------------------------
     if ("history" in globals()) and (history is not None):
         hist = history.history if hasattr(history, "history") else {}
-        if ("loss" in hist) or ("val_loss" in hist):
+        if ("loss" in hist) or ("val_loss" in hist) or ("rmse_dollars" in hist) or ("val_rmse_dollars" in hist):
             plt.figure(figsize=(7, 4))
             if "loss" in hist:
                 plt.plot(hist["loss"], label="loss")
             if "val_loss" in hist:
                 plt.plot(hist["val_loss"], label="val_loss")
             plt.xlabel("Epoch")
-            plt.ylabel("Loss")
-            plt.title("Keras Training Curves")
+            plt.ylabel("Loss (log space)")
+            plt.title("FT-Transformer Training Curves (Loss)")
             plt.legend()
             plt.tight_layout()
             plt.show()
+
+            if ("rmse_dollars" in hist) or ("val_rmse_dollars" in hist):
+                plt.figure(figsize=(7, 4))
+                if "rmse_dollars" in hist:
+                    plt.plot(hist["rmse_dollars"], label="rmse_dollars")
+                if "val_rmse_dollars" in hist:
+                    plt.plot(hist["val_rmse_dollars"], label="val_rmse_dollars")
+                plt.xlabel("Epoch")
+                plt.ylabel("RMSE ($)")
+                plt.title("FT-Transformer Training Curves (RMSE $)")
+                plt.legend()
+                plt.tight_layout()
+                plt.show()
         else:
-            print("ℹ️ history exists but does not contain loss/val_loss keys.")
+            print("ℹ️ history exists but does not contain expected keys.")
     else:
         print("ℹ️ No training history available (likely loaded model or training skipped).")
 
-    print("✅ Done: Keras NN tuned/trained and evaluated (with permutation importance + curves).")
+    print("✅ Done: FT-Transformer trained/loaded and evaluated.")
 ```
 
 ### Metrics Savepoint
@@ -2903,7 +3054,7 @@ def plot_pred_vs_pred(
     *,
     name_a="Model A",
     name_b="Model B",
-    clip_by_y_true=None,   # pass y_true array to clip both preds by y_true quantiles
+    clip_by_y_true=None,   
     clip=False,
     q_low=0.01,
     q_high=0.99
@@ -2969,11 +3120,10 @@ else:
         print("ℹ️ CatBoost not available — skipping CatBoost plots.")
 
     if ("model" in globals()) and (model is not None) and (("test_inputs_tf" in globals()) or ("test_inputs" in globals())):
-        # Prefer tf.data pipeline if available (static shapes + correct string ranks)
+
         if ("test_inputs_tf" in globals()) and (test_inputs_tf is not None):
             preds["Keras"] = predict_dollars(test_inputs_tf)
         else:
-            # fallback (older path) if you still have a numpy/dict input
             preds["Keras"] = predict_dollars(test_inputs)
     else:
         print("ℹ️ Keras model/test_inputs not available — skipping Keras plots.")
