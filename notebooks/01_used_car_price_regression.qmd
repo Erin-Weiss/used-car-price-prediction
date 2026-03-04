@@ -7,7 +7,7 @@ format:
   html:
     toc: true
     toc-depth: 4
-    code-fold: false
+    code-fold: true
     code-tools: true
     theme: cosmo
 execute:
@@ -136,8 +136,9 @@ import pandas as pd
 from datetime import datetime
 import gc
 import sys
-
-import tempfile
+import shutil
+import subprocess
+import zipfile
 
 import matplotlib.pyplot as plt
 import seaborn as sns
@@ -154,21 +155,14 @@ from sklearn.metrics import mean_absolute_error, mean_squared_error
 from catboost import CatBoostRegressor
 import joblib
 
-# -----------------------------------------
-# Fix macOS / networked FS h5py lock issues
-# -----------------------------------------
-os.environ["HDF5_USE_FILE_LOCKING"] = "FALSE"
-
 import tensorflow as tf
 from tensorflow import keras
 from tensorflow.keras import layers
-import keras_tuner as kt
 
-from tensorflow.keras.constraints import MinMaxNorm
-
-import shutil
-import subprocess
-import zipfile
+# ===============================
+# Fix macOS / networked FS h5py lock issues
+# ===============================
+os.environ["HDF5_USE_FILE_LOCKING"] = "FALSE"
 
 # ===============================
 # Training control flags
@@ -1974,13 +1968,13 @@ np.random.seed(SEED)
 # ----------------------------
 FT_CFG = {
     # training
-    "batch_full": 2048,
+    "batch_full": 2048, # instead of 2048, 1024
     "epochs_full": 120,
     "batch_smoke": 512,
     "epochs_smoke": 5,
 
     # early stopping
-    "es_patience_full": 10,
+    "es_patience_full": 20, #10
     "es_patience_smoke": 3,
 
     # optimization
@@ -2009,7 +2003,7 @@ FT_CFG = {
     "pred_batch": 4096,
 
     # optional smoke subsample 
-    "smoke_subsample": False,
+    "smoke_subsample": True,
     "smoke_train_n": 15000,
     "smoke_val_n": 5000,
 }
@@ -2176,18 +2170,23 @@ class RMSEDollars(tf.keras.metrics.Metric):
         y_true_log = tf.cast(y_true_log, tf.float64)
         y_pred_log = tf.cast(y_pred_log, tf.float64)
 
-        # critical: prevent expm1 overflow
+        # ---- CRITICAL: make shapes match (B,)
+        y_true_log = tf.reshape(y_true_log, [-1])  # (B,)
+        y_pred_log = tf.reshape(y_pred_log, [-1])  # (B,)
+
+        # ---- add THIS clipping block here ----
         y_true_log = tf.clip_by_value(y_true_log, self.y_log_min, self.y_log_max)
         y_pred_log = tf.clip_by_value(y_pred_log, self.y_log_min, self.y_log_max)
+        # --------------------------------------
 
         y_true = tf.math.expm1(y_true_log)
         y_pred = tf.math.expm1(y_pred_log)
 
-        err = y_true - y_pred
-        sq = tf.square(err)
+        sq = tf.square(y_true - y_pred)
 
         if sample_weight is not None:
             w = tf.cast(sample_weight, tf.float64)
+            w = tf.reshape(w, [-1])
             sq = sq * w
             self.n.assign_add(tf.reduce_sum(w))
         else:
@@ -2353,7 +2352,7 @@ def build_ft_transformer_model(lr_schedule):
 
     model.compile(
         optimizer=opt,
-        loss=keras.losses.Huber(delta=float(FT_CFG["huber_delta"])),
+        loss=keras.losses.Huber(delta=float(FT_CFG["huber_delta"])), #loss=keras.losses.MeanAbsoluteError(), 
         metrics=[
             keras.metrics.RootMeanSquaredError(name="rmse_log"),
             RMSEDollars(Y_LOG_MIN, Y_LOG_MAX, name="rmse_dollars"),
@@ -2375,12 +2374,31 @@ def make_callbacks(train_mode: str):
     ES_PAT = FT_CFG["es_patience_smoke"] if train_mode == "smoke" else FT_CFG["es_patience_full"]
     return [
         keras.callbacks.EarlyStopping(
-            monitor="val_loss",  # <-- dollars metric
+            monitor="val_loss",  #"val_rmse_dollars"  "val_loss" <-- dollars metric
             mode="min",
             patience=int(ES_PAT),
             restore_best_weights=True,
         ),
     ]
+
+# def make_callbacks(train_mode: str, best_dollars_path: Path):
+#     ES_PAT = FT_CFG["es_patience_smoke"] if train_mode == "smoke" else FT_CFG["es_patience_full"]
+#     return [
+#         keras.callbacks.ModelCheckpoint(
+#             filepath=str(best_dollars_path),
+#             monitor="val_rmse_dollars",
+#             mode="min",
+#             save_best_only=True,
+#             save_weights_only=False,
+#             verbose=0,
+#         ),
+#         keras.callbacks.EarlyStopping(
+#             monitor="val_loss",
+#             mode="min",
+#             patience=int(ES_PAT),
+#             restore_best_weights=True,
+#         ),
+#     ]
 
 # 1) SKIP
 if TRAIN_MODE == "skip":
@@ -2439,6 +2457,7 @@ else:
     KERAS_RUN_DIR.mkdir(parents=True, exist_ok=True)
 
     versioned_path = KERAS_RUN_DIR / "keras_model.keras"
+    best_dollars_path = KERAS_RUN_DIR / "best_by_val_rmse_dollars.keras"
 
     # Run info
     run_info = {
@@ -2505,14 +2524,59 @@ else:
         epochs=int(EPOCHS),
         batch_size=batch_eff,
         verbose=0,
-        callbacks=make_callbacks(TRAIN_MODE),
+        callbacks=make_callbacks(TRAIN_MODE), #best_dollars_path
     )
+
+    # ---------------------------- DEBUG
+    print("----------------------------")
+    print("DEBUG SECTION")
+    print("----------------------------")
+
+    print("FIT epochs requested:", int(EPOCHS))
+    print("FIT epochs completed:", len(history.history.get("loss", [])))
+    print("Callbacks:", [type(cb).__name__ for cb in make_callbacks(TRAIN_MODE)]) #best_dollars_path
+    print("Last val_rmse_dollars:", history.history.get("val_rmse_dollars", [None])[-1])
+
+    pred_log = model.predict(val_inputs_run, batch_size=int(FT_CFG["pred_batch"]), verbose=0).reshape(-1)
+
+    val_true_dollars = np.expm1(y_val_run.astype("float64"))
+    val_pred_dollars = np.expm1(pred_log.astype("float64"))
+
+    print("VAL pred_log1p min/med/max:",
+        float(pred_log.min()), float(np.median(pred_log)), float(pred_log.max()))
+    print("VAL pred$ min/med/max:",
+        float(val_pred_dollars.min()), float(np.median(val_pred_dollars)), float(val_pred_dollars.max()))
+
+    print("After fit: quick val RMSE($) via predict =",
+        float(np.sqrt(np.mean((val_true_dollars - val_pred_dollars) ** 2))))
+
+    vals = history.history.get("val_rmse_dollars", [])
+    print("val_rmse_dollars:", [round(v, 1) for v in vals[:10]], "...")
+    best_ep = int(np.argmin(vals)) if len(vals) else None
+    print("BEST val_rmse_dollars epoch =", best_ep, "value =", vals[best_ep] if best_ep is not None else None)
+
+    print("MODEL OBJECT ID:", id(model))
+    print("HISTORY LEN:", len(history.history["loss"]))
+    print("RUN DIR:", KERAS_RUN_DIR)
+    print("LATEST PATH EXISTS:", latest_path.exists())
+
+    print("After fit: last val_rmse_dollars =", history.history["val_rmse_dollars"][-1])
+    print("----------------------------")
+    print("END DEBUG SECTION")
+    print("----------------------------")
+    # ----------------------------
+
+    # Remember which model was just trained so evaluation uses the same one
+    trained_model_path = versioned_path
 
     # Save versioned always
     model.save(versioned_path, include_optimizer=False)
     print("💾 Saved versioned model:", versioned_path)
 
     # Update latest only for FULL
+    # if _touches_latest():
+    #     print("ℹ️ Full run: latest not updated automatically (decide after comparing checkpoints).")
+
     if _touches_latest():
         model.save(latest_path, include_optimizer=False)
         print("✅ Updated latest model:", latest_path)
@@ -2528,8 +2592,44 @@ else:
 if ("model" not in globals()) or (model is None):
     print("⚠️ Keras model is not available — skipping evaluation.")
 else:
+    # -------------------------------------------------
+    # Ensure evaluation uses the intended model
+    # -------------------------------------------------
+    will_train = bool(globals().get("WILL_TRAIN_KERAS", False))
+
+    if will_train:
+        print("Using in-memory trained model for evaluation")
+        model_eval = model
+    else:
+        # Make WILL_TRAIN_KERAS unambiguous for this path
+        WILL_TRAIN_KERAS = False
+
+        if "trained_model_path" not in globals():
+            raise NameError(
+                "trained_model_path is not defined. "
+                "Set trained_model_path = versioned_path right after fit() (and before evaluation)."
+            )
+
+        print("Loading model for evaluation from:", trained_model_path)
+
+        if not Path(trained_model_path).exists():
+            raise FileNotFoundError(f"trained_model_path not found: {trained_model_path}")
+
+        model_eval = keras.models.load_model(
+            trained_model_path,
+            compile=False,
+            custom_objects={
+                "RMSEDollars": RMSEDollars,
+                "WarmupCosine": WarmupCosine,
+            },
+        )
+
     def predict_dollars(inputs_tf: dict) -> np.ndarray:
-        pred_log = model.predict(inputs_tf, batch_size=int(FT_CFG["pred_batch"]), verbose=0).reshape(-1)
+        pred_log = model_eval.predict(
+            inputs_tf,
+            batch_size=int(FT_CFG["pred_batch"]),
+            verbose=0
+        ).reshape(-1)
         return np.expm1(pred_log.astype("float64"))
 
     # ----------------------------
@@ -2777,6 +2877,42 @@ else:
         print("ℹ️ No training history available (likely loaded model or training skipped).")
 
     print("✅ Done: FT-Transformer trained/loaded and evaluated.")
+
+    # -------------------------------------------------
+    # Optional: Evaluate "best by val_rmse_dollars" checkpoint
+    # -------------------------------------------------
+    if "best_dollars_path" in globals() and Path(best_dollars_path).exists():
+        print("Loading best-by-dollars checkpoint:", best_dollars_path)
+
+        model_best_dollars = keras.models.load_model(
+            best_dollars_path,
+            compile=False,
+            custom_objects={
+                "RMSEDollars": RMSEDollars,
+                "WarmupCosine": WarmupCosine,
+            },
+        )
+
+        def predict_dollars_with(m, inputs_tf: dict) -> np.ndarray:
+            pred_log = m.predict(inputs_tf, batch_size=int(FT_CFG["pred_batch"]), verbose=0).reshape(-1)
+            return np.expm1(pred_log.astype("float64"))
+
+        # TEST
+        pred_test_best = predict_dollars_with(model_best_dollars, test_inputs_tf)
+        best_test_m = metrics_full_and_clipped(true_test, pred_test_best, q_low=0.01, q_high=0.99)
+        display(metrics_to_df(best_test_m, "FT-Transformer (Test) [best val_rmse_dollars]"))
+
+        # TRAIN+VAL
+        pred_trainval_best = predict_dollars_with(model_best_dollars, trainval_inputs_tf)
+        best_trainval_m = metrics_full_and_clipped(true_trainval, pred_trainval_best, q_low=0.01, q_high=0.99)
+        display(metrics_to_df(best_trainval_m, "FT-Transformer (Train+Val) [best val_rmse_dollars]"))
+
+    else:
+        print("ℹ️ No best_by_val_rmse_dollars checkpoint found for this run.")
+
+# ---------------------------- DEBUG
+print("EVAL MODEL OBJECT ID:", id(model_eval))
+# ----------------------------
 ```
 
 ### Metrics Savepoint
