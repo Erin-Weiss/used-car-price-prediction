@@ -158,6 +158,7 @@ import joblib
 import tensorflow as tf
 from tensorflow import keras
 from tensorflow.keras import layers
+# import keras_tuner as kt (imported if tune later)
 
 # ===============================
 # Fix macOS / networked FS h5py lock issues
@@ -2361,6 +2362,248 @@ def build_ft_transformer_model(lr_schedule):
     return model
 ```
 
+#### Keras Model Tuning
+```{python}
+# ==========================================================
+# Step 5.5: Optional KerasTuner 
+# ==========================================================
+
+# ----------------------------
+# Tuning controls
+# ----------------------------
+TUNE = True                 # master switch
+TUNE_WHEN = "full"          # "smoke" | "full" | "both"
+TUNER_KIND = "bayes"        # "bayes" or "random"
+TUNER_MAX_TRIALS = 20       # start small; increase later
+TUNER_EXECUTIONS_PER_TRIAL = 1
+
+# how long each trial trains (keep short; Step 6 is the real training)
+TUNER_EPOCHS_SMOKE = 6
+TUNER_EPOCHS_FULL  = 25
+
+# early stopping inside trials (short + stable)
+TUNER_PATIENCE_SMOKE = 2
+TUNER_PATIENCE_FULL  = 6
+
+# what to optimize during tuning
+TUNER_OBJECTIVE = "val_loss"  # keep aligned with restore_best_weights on val_loss
+# alternative: "val_rmse_dollars"
+
+
+# ----------------------------
+# Import (only if tuning is enabled)
+# ----------------------------
+if TUNE:
+    import keras_tuner as kt
+
+
+# ----------------------------------------------------------
+# 1) Prepare smoke/full datasets
+# ----------------------------------------------------------
+def get_run_data_for_mode(train_mode: str):
+    """
+    Returns:
+      train_inputs_run, val_inputs_run, y_train_run, y_val_run
+    using *your* smoke subsample settings when train_mode == "smoke".
+    """
+    if (train_mode == "smoke") and FT_CFG.get("smoke_subsample", False):
+        rs = np.random.RandomState(SEED)
+        ntr = min(int(FT_CFG["smoke_train_n"]), len(y_train_nn))
+        nva = min(int(FT_CFG["smoke_val_n"]), len(y_val_nn))
+
+        idx_tr = rs.choice(len(y_train_nn), size=ntr, replace=False)
+        idx_va = rs.choice(len(y_val_nn), size=nva, replace=False)
+
+        train_inputs_run = {k: tf.gather(v, idx_tr, axis=0) for k, v in train_inputs_tf.items()}
+        val_inputs_run   = {k: tf.gather(v, idx_va, axis=0) for k, v in val_inputs_tf.items()}
+        y_train_run = y_train_nn[idx_tr]
+        y_val_run   = y_val_nn[idx_va]
+        print(f"🧪 {train_mode} subsample: train={ntr:,} val={nva:,}")
+        return train_inputs_run, val_inputs_run, y_train_run, y_val_run
+
+    # full (or smoke without subsample)
+    return train_inputs_tf, val_inputs_tf, y_train_nn, y_val_nn
+
+
+# ----------------------------------------------------------
+# 2) One place to compute schedule + build model (same as Step 6)
+# ----------------------------------------------------------
+def build_model_with_cfg(cfg: dict, *, n_train_rows: int, epochs: int, batch_size: int):
+    """
+    Builds a compiled model using the real builder:
+      - same steps_per_epoch/total_steps/warmup logic as Step 6
+      - same WarmupCosine + build_ft_transformer_model
+    """
+    batch_eff = min(int(batch_size), int(n_train_rows))
+    steps_per_epoch = int(np.ceil(n_train_rows / batch_eff))
+    total_steps = int(steps_per_epoch * int(epochs))
+    warmup_steps = max(1, int(float(cfg["warmup_frac"]) * total_steps))
+
+    lr_schedule = WarmupCosine(
+        base_lr=float(cfg["lr"]),
+        warmup_steps=warmup_steps,
+        total_steps=total_steps,
+        min_lr=float(cfg["min_lr"]),
+    )
+
+    # IMPORTANT: your build_ft_transformer_model reads global FT_CFG
+    # so we temporarily swap it, build, then restore.
+    global FT_CFG
+    _backup = dict(FT_CFG)
+    FT_CFG = dict(cfg)
+    try:
+        model = build_ft_transformer_model(lr_schedule)
+    finally:
+        FT_CFG = _backup
+
+    return model
+
+
+# ----------------------------------------------------------
+# 3) Tuner hyperparameter space
+#    (only tune a few knobs to avoid "breaks")
+# ----------------------------------------------------------
+def apply_hp_to_cfg(base_cfg: dict, hp: "kt.HyperParameters") -> dict:
+    cfg = dict(base_cfg)
+
+    # Keep it tight. Add more later once stable.
+    cfg["lr"] = hp.Choice("lr", [1e-4, 2e-4, 3e-4])
+    cfg["warmup_frac"] = hp.Choice("warmup_frac", [0.05, 0.10, 0.15])
+    cfg["weight_decay"] = hp.Choice("weight_decay", [0.0, 1e-4, 3e-4])
+
+    cfg["ff_dropout"] = hp.Choice("ff_dropout", [0.10, 0.15, 0.20])
+    cfg["attn_dropout"] = hp.Choice("attn_dropout", [0.05, 0.10, 0.15])
+    cfg["embed_dropout"] = hp.Choice("embed_dropout", [0.00, 0.05, 0.10])
+
+    return cfg
+
+
+# ----------------------------------------------------------
+# 4) Run tuner (reuses get_run_data_for_mode)
+# ----------------------------------------------------------
+def run_tuner_for_mode(mode: str):
+    """
+    Runs tuning for 'smoke' or 'full' using the SAME run inputs the pipeline uses.
+    Returns best_hp (kt.HyperParameters) or None if tuning is skipped.
+    """
+    if not TUNE:
+        return None
+
+    if (TUNE_WHEN == "smoke" and mode != "smoke") or (TUNE_WHEN == "full" and mode != "full"):
+        return None
+    if (TUNE_WHEN == "both") is False and (TUNE_WHEN not in ("smoke", "full")):
+        return None
+
+    # Use the exact run data this mode will use
+    train_inputs_run, val_inputs_run, y_train_run, y_val_run = get_run_data_for_mode(mode)
+
+    # Trial epoch budget by mode (keep short)
+    trial_epochs = int(TUNER_EPOCHS_SMOKE if mode == "smoke" else TUNER_EPOCHS_FULL)
+    trial_batch  = int(FT_CFG["batch_smoke"] if mode == "smoke" else FT_CFG["batch_full"])
+    batch_eff = min(trial_batch, int(len(y_train_run)))
+
+    patience = int(TUNER_PATIENCE_SMOKE if mode == "smoke" else TUNER_PATIENCE_FULL)
+
+    # tuner directory
+    tuner_dir = KERAS_DIR / "tuner"
+    tuner_dir.mkdir(parents=True, exist_ok=True)
+    tuner_project = f"ft_{TUNER_KIND}_{mode}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+
+    # Model builder for trials
+    def hypermodel(hp):
+        cfg_trial = apply_hp_to_cfg(FT_CFG, hp)
+        return build_model_with_cfg(
+            cfg_trial,
+            n_train_rows=int(len(y_train_run)),
+            epochs=trial_epochs,
+            batch_size=batch_eff,
+        )
+
+    # Choose tuner
+    objective = kt.Objective(TUNER_OBJECTIVE, direction="min")
+
+    if TUNER_KIND == "bayes":
+        tuner = kt.BayesianOptimization(
+            hypermodel=hypermodel,
+            objective=objective,
+            max_trials=int(TUNER_MAX_TRIALS),
+            executions_per_trial=int(TUNER_EXECUTIONS_PER_TRIAL),
+            directory=str(tuner_dir),
+            project_name=tuner_project,
+            overwrite=True,
+        )
+    else:
+        tuner = kt.RandomSearch(
+            hypermodel=hypermodel,
+            objective=objective,
+            max_trials=int(TUNER_MAX_TRIALS),
+            executions_per_trial=int(TUNER_EXECUTIONS_PER_TRIAL),
+            directory=str(tuner_dir),
+            project_name=tuner_project,
+            overwrite=True,
+        )
+
+    # Trial callbacks (simple + aligned)
+    cb = keras.callbacks.EarlyStopping(
+        monitor=TUNER_OBJECTIVE,
+        mode="min",
+        patience=patience,
+        restore_best_weights=True,
+    )
+
+    print(f"🔎 Tuning START | mode={mode} | trials={TUNER_MAX_TRIALS} | epochs/trial={trial_epochs} | batch={batch_eff}")
+    tuner.search(
+        train_inputs_run, y_train_run,
+        validation_data=(val_inputs_run, y_val_run),
+        epochs=trial_epochs,
+        batch_size=batch_eff,
+        callbacks=[cb],
+        verbose=0,
+    )
+
+    best_hp = tuner.get_best_hyperparameters(1)[0]
+
+    # Save best hp for reproducibility
+    run_info = {
+        "mode": mode,
+        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "tuner_kind": TUNER_KIND,
+        "objective": TUNER_OBJECTIVE,
+        "max_trials": int(TUNER_MAX_TRIALS),
+        "epochs_per_trial": int(trial_epochs),
+        "best_hp": dict(best_hp.values),
+    }
+    atomic_write_json(Path(tuner_dir) / f"best_hp_{mode}_{tuner_project}.json", run_info)
+
+    print("✅ Tuning DONE | best_hp:", best_hp.values)
+    return best_hp
+
+
+# ----------------------------------------------------------
+# 5) Apply tuning results to FT_CFG (only when it matters)
+#    - smoke tuning: do NOT overwrite FT_CFG (sanity only)
+#    - full tuning:  DO overwrite FT_CFG so Step 6 uses it
+# ----------------------------------------------------------
+best_hp = None
+if TUNE:
+    if TUNE_WHEN in ("smoke", "both") and TRAIN_MODE == "smoke":
+        best_hp = run_tuner_for_mode("smoke")
+        print("ℹ️ Smoke tuning is sanity-only: FT_CFG NOT overwritten.")
+    elif TUNE_WHEN in ("full", "both") and TRAIN_MODE == "full":
+        best_hp = run_tuner_for_mode("full")
+        if best_hp is not None:
+            # Apply only the tuned keys
+            FT_CFG["lr"] = float(best_hp.get("lr"))
+            FT_CFG["warmup_frac"] = float(best_hp.get("warmup_frac"))
+            FT_CFG["weight_decay"] = float(best_hp.get("weight_decay"))
+            FT_CFG["ff_dropout"] = float(best_hp.get("ff_dropout"))
+            FT_CFG["attn_dropout"] = float(best_hp.get("attn_dropout"))
+            FT_CFG["embed_dropout"] = float(best_hp.get("embed_dropout"))
+
+            print("✅ FT_CFG updated (for Step 6 full training):")
+            print({k: FT_CFG[k] for k in ["lr","warmup_frac","weight_decay","ff_dropout","attn_dropout","embed_dropout"]})
+```
+
 #### Keras Model Training 
 ```{python}
 # ----------------------------
@@ -2432,24 +2675,8 @@ else:
 
     BATCH  = FT_CFG["batch_smoke"] if TRAIN_MODE == "smoke" else FT_CFG["batch_full"]
     EPOCHS = FT_CFG["epochs_smoke"] if TRAIN_MODE == "smoke" else FT_CFG["epochs_full"]
-
-    # Optional smoke subsample
-    if TRAIN_MODE == "smoke" and FT_CFG.get("smoke_subsample", False):
-        rs = np.random.RandomState(SEED)
-        ntr = min(int(FT_CFG["smoke_train_n"]), len(y_train_nn))
-        nva = min(int(FT_CFG["smoke_val_n"]), len(y_val_nn))
-
-        idx_tr = rs.choice(len(y_train_nn), size=ntr, replace=False)
-        idx_va = rs.choice(len(y_val_nn), size=nva, replace=False)
-
-        train_inputs_run = {k: tf.gather(v, idx_tr, axis=0) for k, v in train_inputs_tf.items()}
-        val_inputs_run   = {k: tf.gather(v, idx_va, axis=0) for k, v in val_inputs_tf.items()}
-        y_train_run = y_train_nn[idx_tr]
-        y_val_run   = y_val_nn[idx_va]
-        print(f"🧪 Smoke subsample: train={ntr:,} val={nva:,}")
-    else:
-        train_inputs_run, val_inputs_run = train_inputs_tf, val_inputs_tf
-        y_train_run, y_val_run = y_train_nn, y_val_nn
+    
+    train_inputs_run, val_inputs_run, y_train_run, y_val_run = get_run_data_for_mode(TRAIN_MODE)
 
     # Run folder
     run_ts = datetime.now().strftime("%Y%m%d_%H%M%S")
