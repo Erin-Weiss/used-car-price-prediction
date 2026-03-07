@@ -1975,7 +1975,7 @@ FT_CFG = {
     "epochs_smoke": 5,
 
     # early stopping
-    "es_patience_full": 20, # was 10
+    "es_patience_full": 20,  # was 10
     "es_patience_smoke": 3,
 
     # optimization
@@ -1996,6 +1996,7 @@ FT_CFG = {
 
     # embedding handling
     "embed_dropout": 0.0,    # was 0.05
+    "head_dropout": 0.1,
 
     # warmup
     "warmup_frac": 0.05,     # was 0.10, 10% of total steps
@@ -2007,6 +2008,17 @@ FT_CFG = {
     "smoke_subsample": True,
     "smoke_train_n": 15000,
     "smoke_val_n": 5000,
+
+    # ----------------------------
+    # Alternative config from tuning
+        # larger-capacity variant
+        # better MAE / clipped performance
+        # worse full test RMSE
+    # ----------------------------
+    # "d_token": 128,
+    # "n_blocks": 4,
+    # "resid_dropout": 0.0,
+    # "head_dropout": 0.1,
 }
 
 # ----------------------------
@@ -2461,7 +2473,7 @@ def build_model_with_cfg(cfg: dict, *, n_train_rows: int, epochs: int, batch_siz
 # ----------------------------------------------------------
 # 3) Tuner hyperparameter space 
 #    - Round 1 is baked into FT_CFG already
-#    - Round 2 tunes capacity + regularization + batch size
+#    - Round 2 (a and b) tunes capacity + regularization + batch size
 # ----------------------------------------------------------
 def apply_hp_to_cfg(base_cfg: dict, hp: "kt.HyperParameters") -> dict:
     cfg = dict(base_cfg)
@@ -2479,11 +2491,11 @@ def apply_hp_to_cfg(base_cfg: dict, hp: "kt.HyperParameters") -> dict:
     # cfg["lr"]         = hp.Choice("lr", [1e-4, 2e-4, 3e-4, 4e-4]) # -- was 3e-4, then picked 4e-4
     # cfg["weight_decay"]  = hp.Choice("weight_decay", [0.0, 1e-5, 3e-5, 1e-4]) # -- was 0.0, then picked 1e-4
 
-    # Round 2b
-    cfg["d_token"]    = hp.Choice("d_token", [64, 96, 128])
-    cfg["n_blocks"]   = hp.Choice("n_blocks", [2, 3, 4])
-    cfg["resid_dropout"] = hp.Choice("resid_dropout", [0.0, 0.05, 0.10])
-    cfg["head_dropout"]  = hp.Choice("head_dropout",  [0.0, 0.05, 0.10, 0.15])
+    # Round 2b--did not select due to higher performace cost and not meaningful improvement
+    # cfg["d_token"]    = hp.Choice("d_token", [96, 128]) # -- picked 128, was 96
+    # cfg["n_blocks"]   = hp.Choice("n_blocks", [3, 4]) # -- picked 4, was 3
+    # cfg["resid_dropout"] = hp.Choice("resid_dropout", [0.0, 0.05, 0.10]) # -- picked 0.0, was 0.05
+    # cfg["head_dropout"]  = hp.Choice("head_dropout",  [0.0, 0.05, 0.10, 0.15]) # -- picked 0.1, was 0.1
 
     return cfg
 
@@ -2626,17 +2638,21 @@ def run_tuner_for_mode(mode: str):
 TUNED_KEYS_TO_APPLY = [
     # "batch_full",
     # "lr",
-    "d_token",
-    "n_blocks",
-    "resid_dropout",
-    "head_dropout",
+    # "warmup_frac"
+    # "ff_dropout"
+    # "attn_dropout"
+    # "embed_dropout"
+    # "d_token",
+    # "n_blocks",
+    # "resid_dropout",
+    # "head_dropout",
     # "weight_decay",
 ]
 
 INT_TUNED_KEYS = {
     # "batch_full",
-    "d_token",
-    "n_blocks",
+    # "d_token",
+    # "n_blocks",
 }
 
 best_hp = None
