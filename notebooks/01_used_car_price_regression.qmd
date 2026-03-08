@@ -3424,183 +3424,211 @@ else:
     keras_trainval_clipped = keras_trainval_m["clipped"]
 
     # ----------------------------
-    # Permutation importance (per-feature + optional subsample)
-    # Robust for TF tensors + Keras predict (forces static shapes)
+    # Permutation importance (per-feature)
+    # Works with the current evaluation flow
     # ----------------------------
-    # def permutation_importance_keras_per_feature(
-    #     base_inputs: dict,
-    #     y_true_dollars: np.ndarray,
-    #     *,
-    #     n_repeats: int = 3,
-    #     seed: int = 42,
-    #     max_rows: int | None = 20000,
-    #     include_categoricals: bool = True,
-    # ):
-    #     rs = np.random.RandomState(seed)
+    def permutation_importance_keras_per_feature(
+        base_inputs: dict,
+        y_true_dollars: np.ndarray,
+        *,
+        feature_names_numeric: list[str],
+        feature_names_categorical: list[str],
+        n_repeats: int = 3,
+        seed: int = 42,
+        max_rows: int | None = 20000,
+        include_categoricals: bool = True,
+    ):
+        rs = np.random.RandomState(seed)
 
-    #     # Cache expected widths for static shaping (based on the inputs we were given)
-    #     d_num = int(base_inputs["numeric"].shape[1])  # must be known
-    #     cat_keys = [k for k in base_inputs.keys() if k != "numeric"]
+        # Expected numeric width from current evaluation inputs
+        d_num = int(base_inputs["numeric"].shape[1])
+        cat_keys = [k for k in base_inputs.keys() if k != "numeric"]
 
-    #     def _force_static_shapes(inputs: dict) -> dict:
-    #         """
-    #         Ensure Keras sees the exact input ranks/shapes the model was built with:
-    #         - numeric: (None, d_num) float32
-    #         - each categorical: (None,) string   <-- IMPORTANT (no trailing 1 dim)
-    #         """
-    #         out = {}
+        def _force_static_shapes(inputs: dict) -> dict:
+            """
+            Ensure model sees the exact ranks/shapes expected:
+            - numeric: (None, d_num) float32
+            - each categorical: (None,) string
+            """
+            out = {}
 
-    #         # -----------------------
-    #         # numeric: (None, d_num)
-    #         # -----------------------
-    #         xnum = tf.convert_to_tensor(inputs["numeric"], dtype=tf.float32)
+            # numeric
+            xnum = tf.convert_to_tensor(inputs["numeric"], dtype=tf.float32)
+            if xnum.shape.rank == 1:
+                xnum = tf.reshape(xnum, [-1, d_num])
+            elif xnum.shape.rank == 2 and xnum.shape[-1] != d_num:
+                xnum = tf.reshape(xnum, [-1, d_num])
+            xnum.set_shape([None, d_num])
+            out["numeric"] = xnum
 
-    #         # If someone accidentally passed numeric as (N,) or wrong last dim, coerce
-    #         if xnum.shape.rank == 1:
-    #             xnum = tf.reshape(xnum, [-1, d_num])
-    #         elif xnum.shape.rank == 2 and xnum.shape[-1] != d_num:
-    #             xnum = tf.reshape(xnum, [-1, d_num])
+            # categoricals
+            for k in cat_keys:
+                x = tf.convert_to_tensor(inputs[k], dtype=tf.string)
 
-    #         xnum.set_shape([None, d_num])
-    #         out["numeric"] = xnum
+                if x.shape.rank == 2 and x.shape[-1] == 1:
+                    x = tf.reshape(x, [-1])
+                elif x.shape.rank != 1:
+                    x = tf.reshape(x, [-1])
 
-    #         # -----------------------
-    #         # categoricals: (None,) string
-    #         # -----------------------
-    #         for k in cat_keys:
-    #             x = tf.convert_to_tensor(inputs[k], dtype=tf.string)
+                x.set_shape([None])
+                out[k] = x
 
-    #             # If passed as (N,1), squeeze to (N,)
-    #             if x.shape.rank == 2 and x.shape[-1] == 1:
-    #                 x = tf.reshape(x, [-1])
-    #             # If any other unexpected rank, coerce to (N,)
-    #             elif x.shape.rank != 1:
-    #                 x = tf.reshape(x, [-1])
+            return out
 
-    #             x.set_shape([None])
-    #             out[k] = x
+        def _gather_rows_tf(inputs: dict, idx_rows: np.ndarray) -> dict:
+            idx_tf = tf.convert_to_tensor(idx_rows, dtype=tf.int32)
+            out = {}
+            for k, v in inputs.items():
+                v = tf.convert_to_tensor(v)
+                out[k] = tf.gather(v, idx_tf, axis=0)
+            return _force_static_shapes(out)
 
-    #         return out
+        def _predict_dollars_local(inputs_tf: dict) -> np.ndarray:
+            pred_log = model_eval.predict(
+                inputs_tf,
+                batch_size=pred_batch_eval,
+                verbose=0
+            ).reshape(-1)
+            return np.expm1(pred_log.astype("float64"))
 
-    #     def _gather_rows_tf(inputs: dict, idx_rows: np.ndarray) -> dict:
-    #         idx_tf = tf.convert_to_tensor(idx_rows, dtype=tf.int32)
-    #         out = {}
-    #         for k, v in inputs.items():
-    #             v = tf.convert_to_tensor(v)
-    #             out[k] = tf.gather(v, idx_tf, axis=0)
-    #         return _force_static_shapes(out)
+        # ----------------------------
+        # 0) Optional subsample
+        # ----------------------------
+        N = int(len(y_true_dollars))
+        if (max_rows is not None) and (N > int(max_rows)):
+            idx_rows = rs.choice(N, size=int(max_rows), replace=False)
+            sub_inputs = _gather_rows_tf(base_inputs, idx_rows)
+            y_sub = np.asarray(y_true_dollars)[idx_rows]
+        else:
+            sub_inputs = _force_static_shapes(base_inputs)
+            y_sub = np.asarray(y_true_dollars)
 
-    #     # ----------------------------
-    #     # 0) Subsample rows for speed (optional)
-    #     # ----------------------------
-    #     N = int(len(y_true_dollars))
-    #     if (max_rows is not None) and (N > int(max_rows)):
-    #         idx_rows = rs.choice(N, size=int(max_rows), replace=False)
-    #         sub_inputs = _gather_rows_tf(base_inputs, idx_rows)
-    #         y_sub = y_true_dollars[idx_rows]
-    #     else:
-    #         sub_inputs = _force_static_shapes(base_inputs)
-    #         y_sub = y_true_dollars
+        # ----------------------------
+        # 1) Baseline RMSE
+        # ----------------------------
+        base_pred = _predict_dollars_local(sub_inputs)
+        base_rmse = float(np.sqrt(np.mean((y_sub - base_pred) ** 2)))
 
-    #     # ----------------------------
-    #     # 1) Baseline RMSE
-    #     # ----------------------------
-    #     base_pred = _predict_dollars(sub_inputs)
-    #     base_rmse = float(np.sqrt(np.mean((y_sub - base_pred) ** 2)))
+        rows = []
 
-    #     rows = []
+        # ----------------------------
+        # 2) Numeric feature importance
+        # ----------------------------
+        Xnum = sub_inputs["numeric"]
 
-    #     # ----------------------------
-    #     # 2) Numeric per-column importance
-    #     # ----------------------------
-    #     Xnum = sub_inputs["numeric"]  # (N, d_num)
-    #     n_sub = int(Xnum.shape[0]) if Xnum.shape[0] is not None else len(y_sub)
+        if len(feature_names_numeric) == d_num:
+            num_names = list(feature_names_numeric)
+        else:
+            num_names = [f"num_{j}" for j in range(d_num)]
 
-    #     if ("num_cols_nn" in globals()) and (len(num_cols_nn) == d_num):
-    #         num_names = list(num_cols_nn)
-    #     else:
-    #         num_names = [f"num_{j}" for j in range(d_num)]
+        for j in range(d_num):
+            deltas = []
+            for _ in range(int(n_repeats)):
+                idx_perm = rs.permutation(len(y_sub))
+                idx_tf = tf.convert_to_tensor(idx_perm, dtype=tf.int32)
 
-    #     for j in range(d_num):
-    #         deltas = []
-    #         for _ in range(int(n_repeats)):
-    #             idx_perm = rs.permutation(len(y_sub))
-    #             idx_tf = tf.convert_to_tensor(idx_perm, dtype=tf.int32)
+                col_perm = tf.gather(Xnum[:, j], idx_tf)
+                col_perm = tf.expand_dims(col_perm, axis=1)
 
-    #             col_perm = tf.gather(Xnum[:, j], idx_tf)              # (N,)
-    #             col_perm = tf.expand_dims(col_perm, axis=1)           # (N,1)
+                left = Xnum[:, :j]
+                right = Xnum[:, j+1:]
+                Xnum_new = tf.concat([left, col_perm, right], axis=1)
+                Xnum_new.set_shape([None, d_num])
 
-    #             left  = Xnum[:, :j]                                   # (N, j)
-    #             right = Xnum[:, j+1:]                                 # (N, d-j-1)
-    #             Xnum_new = tf.concat([left, col_perm, right], axis=1) # (N, d_num)
-    #             Xnum_new.set_shape([None, d_num])
+                pert = dict(sub_inputs)
+                pert["numeric"] = Xnum_new
+                pert = _force_static_shapes(pert)
 
-    #             pert = dict(sub_inputs)
-    #             pert["numeric"] = Xnum_new
-    #             pert = _force_static_shapes(pert)
+                pred = _predict_dollars_local(pert)
+                rmse = float(np.sqrt(np.mean((y_sub - pred) ** 2)))
+                deltas.append(rmse - base_rmse)
 
-    #             pred = _predict_dollars(pert)
-    #             rmse = float(np.sqrt(np.mean((y_sub - pred) ** 2)))
-    #             deltas.append(rmse - base_rmse)
+            rows.append({
+                "feature": num_names[j],
+                "feature_type": "numeric",
+                "rmse_increase": float(np.mean(deltas)),
+                "rmse_increase_std": float(np.std(deltas)),
+            })
 
-    #         rows.append({
-    #             "feature": num_names[j],
-    #             "feature_type": "numeric",
-    #             "rmse_increase": float(np.mean(deltas)),
-    #             "rmse_increase_std": float(np.std(deltas)),
-    #         })
+        # ----------------------------
+        # 3) Categorical feature importance
+        # ----------------------------
+        if include_categoricals:
+            for key in cat_keys:
+                deltas = []
+                Xcat = sub_inputs[key]
 
-    #     # ----------------------------
-    #     # 3) Categorical per-key importance (optional)
-    #     # ----------------------------
-    #     if include_categoricals:
-    #         for key in cat_keys:
-    #             deltas = []
-    #             Xcat = sub_inputs[key]  # (N,) tf.string   <-- FIXED
+                for _ in range(int(n_repeats)):
+                    idx_perm = rs.permutation(len(y_sub))
+                    idx_tf = tf.convert_to_tensor(idx_perm, dtype=tf.int32)
 
-    #             for _ in range(int(n_repeats)):
-    #                 idx_perm = rs.permutation(len(y_sub))
-    #                 idx_tf = tf.convert_to_tensor(idx_perm, dtype=tf.int32)
+                    Xcat_new = tf.gather(Xcat, idx_tf, axis=0)
+                    Xcat_new.set_shape([None])
 
-    #                 Xcat_new = tf.gather(Xcat, idx_tf, axis=0)  # (N,)
-    #                 Xcat_new.set_shape([None])                  # <-- FIXED (no [None,1])
+                    pert = dict(sub_inputs)
+                    pert[key] = Xcat_new
+                    pert = _force_static_shapes(pert)
 
-    #                 pert = dict(sub_inputs)
-    #                 pert[key] = Xcat_new
-    #                 pert = _force_static_shapes(pert)
+                    pred = _predict_dollars_local(pert)
+                    rmse = float(np.sqrt(np.mean((y_sub - pred) ** 2)))
+                    deltas.append(rmse - base_rmse)
 
-    #                 pred = _predict_dollars(pert)
-    #                 rmse = float(np.sqrt(np.mean((y_sub - pred) ** 2)))
-    #                 deltas.append(rmse - base_rmse)
+                rows.append({
+                    "feature": key,
+                    "feature_type": "categorical",
+                    "rmse_increase": float(np.mean(deltas)),
+                    "rmse_increase_std": float(np.std(deltas)),
+                })
 
-    #             rows.append({
-    #                 "feature": key,
-    #                 "feature_type": "categorical",
-    #                 "rmse_increase": float(np.mean(deltas)),
-    #                 "rmse_increase_std": float(np.std(deltas)),
-    #             })
+        df_pi = (
+            pd.DataFrame(rows)
+            .sort_values("rmse_increase", ascending=False)
+            .reset_index(drop=True)
+        )
+        return base_rmse, df_pi
 
-    #     df_pi = (
-    #         pd.DataFrame(rows)
-    #         .sort_values("rmse_increase", ascending=False)
-    #         .reset_index(drop=True)
-    #     )
-    #     return base_rmse, df_pi
+    # ----------------------------
+    # Keras permutation importance
+    # ----------------------------
+    try:
+        if ("eval_art" in locals()) and (eval_art is not None):
+            pi_num_names = list(eval_art["num_cols"])
+            pi_cat_names = list(eval_art["cat_cols"])
+        else:
+            pi_num_names = list(num_cols_nn)
+            pi_cat_names = list(cat_cols_nn)
 
-    # # ---- Run it ----
-    # try:
-    #     base_rmse_pi, pi_df = permutation_importance_keras_per_feature(
-    #         test_inputs_tf,
-    #         true_test,  # must be dollars
-    #         n_repeats=3,
-    #         seed=SEED if "SEED" in globals() else 42,
-    #         max_rows=20000,
-    #         include_categoricals=True
-    #     )
-    #     print(f"Baseline TEST RMSE ($) [subset for PI]: {base_rmse_pi:,.0f}")
-    #     display(pi_df.head(30))
-    # except Exception as e:
-    #     print("⚠️ Permutation importance failed:", e)
+        base_rmse_pi, pi_df = permutation_importance_keras_per_feature(
+            test_inputs_tf_eval,
+            true_test,   # dollars
+            feature_names_numeric=pi_num_names,
+            feature_names_categorical=pi_cat_names,
+            n_repeats=2,
+            seed=SEED if "SEED" in globals() else 42,
+            max_rows=10000,
+            include_categoricals=True,
+        )
+
+        print(f"Baseline TEST RMSE ($) [subset for PI]: {base_rmse_pi:,.0f}")
+
+        pi_df_display = pi_df.copy()
+
+        total = pi_df_display["rmse_increase"].clip(lower=0).sum()
+        if total > 0:
+            pi_df_display["importance_pct"] = (
+                100 * pi_df_display["rmse_increase"].clip(lower=0) / total
+            )
+        else:
+            pi_df_display["importance_pct"] = 0.0
+
+        display(
+            pi_df_display[
+                ["feature", "feature_type", "rmse_increase", "importance_pct", "rmse_increase_std"]
+            ].head(30)
+        )
+
+    except Exception as e:
+        print("⚠️ Permutation importance failed:", e)
 
     if ("history" in globals()) and (history is not None):
         hist = history.history if hasattr(history, "history") else {}
