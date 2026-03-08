@@ -159,6 +159,7 @@ import tensorflow as tf
 from tensorflow import keras
 from tensorflow.keras import layers
 # import keras_tuner as kt (imported if tune later)
+import keras_tuner as kt
 
 # ===============================
 # Fix macOS / networked FS h5py lock issues
@@ -2085,22 +2086,39 @@ print("Categorical cols:", len(cat_cols_nn), cat_cols_nn)
 # ----------------------------
 KERAS_DIR = MODEL_DIR / "keras"
 KERAS_DIR.mkdir(parents=True, exist_ok=True)
+
 KERAS_RUNS_DIR = KERAS_DIR / "runs"
 KERAS_RUNS_DIR.mkdir(parents=True, exist_ok=True)
-latest_path = KERAS_DIR / "keras_model.keras"  # "latest" pointer
+
+# Weights-based latest artifacts
+KERAS_LATEST_WEIGHTS_PATH = KERAS_DIR / "keras_model.weights.h5"
+KERAS_LATEST_RUN_INFO_PATH = KERAS_DIR / "keras_run_info.json"
+KERAS_LATEST_TRAIN_MEDIANS_PATH = KERAS_DIR / "keras_train_medians.json"
+KERAS_LATEST_NUM_NORM_STATS_PATH = KERAS_DIR / "keras_num_norm_stats.json"
+KERAS_LATEST_LOOKUP_VOCABS_PATH = KERAS_DIR / "keras_lookup_vocabs.json"
 
 def _keras_latest_exists() -> bool:
-    return latest_path.exists()
+    return (
+        KERAS_LATEST_WEIGHTS_PATH.exists()
+        and KERAS_LATEST_RUN_INFO_PATH.exists()
+        and KERAS_LATEST_TRAIN_MEDIANS_PATH.exists()
+        and KERAS_LATEST_NUM_NORM_STATS_PATH.exists()
+        and KERAS_LATEST_LOOKUP_VOCABS_PATH.exists()
+    )
 
 def _touches_latest() -> bool:
     return TRAIN_MODE == "full"
 
-WILL_TRAIN_KERAS = (
+SHOULD_TRAIN_KERAS = (
     (TRAIN_MODE == "smoke") or
-    (TRAIN_MODE == "full" and (RETRAIN_KERAS or (not latest_path.exists())))
+    (TRAIN_MODE == "full" and (RETRAIN_KERAS or (not _keras_latest_exists())))
 )
 
-print("FT-Transformer WILL_TRAIN_KERAS =", WILL_TRAIN_KERAS, "| latest exists =", latest_path.exists())
+print("FT-Transformer SHOULD_TRAIN_KERAS =", SHOULD_TRAIN_KERAS, "| latest exists =", _keras_latest_exists())
+
+KERAS_EVAL_ARTIFACT_DIR = None
+KERAS_EVAL_ARTIFACT_KIND = None   # "latest" | "run"
+KERAS_MODEL_SOURCE = None         # "latest_loaded" | "trained_this_run" | None
 
 # ----------------------------
 # Step 2: Prepare train/val/test (NN copies) + imputations
@@ -2109,7 +2127,6 @@ X_train_nn = X_train.copy()
 X_val_nn   = X_val.copy()
 X_test_nn  = X_test.copy()
 
-# Add missing indicators 
 missing_indicator_cols = []
 for col in ["engine_liters", "engine_cylinders"]:
     if col in X_train_nn.columns:
@@ -2127,12 +2144,20 @@ train_medians = X_train_nn[num_cols_nn].median(numeric_only=True)
 for df_ in (X_train_nn, X_val_nn, X_test_nn):
     df_[num_cols_nn] = df_[num_cols_nn].fillna(train_medians)
 
+# Manual numeric normalization using TRAIN statistics only
+train_num_mean = X_train_nn[num_cols_nn].mean()
+train_num_var = X_train_nn[num_cols_nn].var(ddof=0)
+train_num_std = np.sqrt(np.maximum(train_num_var.to_numpy(dtype=np.float64), 1e-12))
+train_num_std = pd.Series(train_num_std, index=num_cols_nn)
+
+for df_ in (X_train_nn, X_val_nn, X_test_nn):
+    df_[num_cols_nn] = (df_[num_cols_nn] - train_num_mean) / train_num_std
+
 # Categorical fill/cast
 for c in cat_cols_nn:
     for df_ in (X_train_nn, X_val_nn, X_test_nn):
         df_[c] = df_[c].fillna("unknown").astype(str)
 
-# Targets (already log1p)
 y_train_nn = y_train.to_numpy().astype("float32")
 y_val_nn   = y_val.to_numpy().astype("float32")
 y_test_nn  = y_test.to_numpy().astype("float32")
@@ -2141,22 +2166,12 @@ print("Rows:", {"train": len(X_train_nn), "val": len(X_val_nn), "test": len(X_te
 print("NN numeric cols:", len(num_cols_nn), "| NN cat cols:", len(cat_cols_nn))
 
 # ----------------------------
-# Step 3: Adapt preprocessing layers 
+# Step 3: Prepare categorical vocabularies
 # ----------------------------
-# - Normalization for numeric
-# - StringLookup vocab per categorical
-NUM_NORM_WEIGHTS = None
-LOOKUP_VOCABS = None
-VOCAB_SIZES = None
+LOOKUP_VOCABS = {}
+VOCAB_SIZES = {}
 
-if WILL_TRAIN_KERAS:
-    # Numeric normalization (train-only)
-    num_norm = layers.Normalization(name="num_norm")
-    num_norm.adapt(X_train_nn[num_cols_nn].astype("float32").to_numpy())
-    NUM_NORM_WEIGHTS = num_norm.get_weights()
-
-    LOOKUP_VOCABS = {}
-    VOCAB_SIZES = {}
+if SHOULD_TRAIN_KERAS:
     for c in cat_cols_nn:
         lk = layers.StringLookup(
             output_mode="int",
@@ -2165,11 +2180,14 @@ if WILL_TRAIN_KERAS:
             name=f"{c}_lookup",
         )
         lk.adapt(X_train_nn[c].to_numpy(dtype=str))
-        vocab = lk.get_vocabulary()
+
+        vocab = lk.get_vocabulary(include_special_tokens=False)
+        vocab = [str(v) for v in vocab]
+
         LOOKUP_VOCABS[c] = vocab
-        VOCAB_SIZES[c] = int(len(vocab))
+        VOCAB_SIZES[c] = int(len(vocab) + 1)
 else:
-    print("⏭️ Skipping adapt — will load existing model.")
+    print("⏭️ Skipping adapt — will load existing latest weights/artifacts.")
 ```
 
 #### Keras Model Building 
@@ -2216,14 +2234,12 @@ class RMSEDollars(tf.keras.metrics.Metric):
         y_true_log = tf.cast(y_true_log, tf.float64)
         y_pred_log = tf.cast(y_pred_log, tf.float64)
 
-        # ---- CRITICAL: make shapes match (B,)
+        # make shapes match (B,)
         y_true_log = tf.reshape(y_true_log, [-1])  # (B,)
         y_pred_log = tf.reshape(y_pred_log, [-1])  # (B,)
 
-        # ---- add THIS clipping block here ----
         y_true_log = tf.clip_by_value(y_true_log, self.y_log_min, self.y_log_max)
         y_pred_log = tf.clip_by_value(y_pred_log, self.y_log_min, self.y_log_max)
-        # --------------------------------------
 
         y_true = tf.math.expm1(y_true_log)
         y_pred = tf.math.expm1(y_pred_log)
@@ -2295,66 +2311,82 @@ class WarmupCosine(tf.keras.optimizers.schedules.LearningRateSchedule):
 # ----------------------------
 # Step 5: FT-Transformer blocks + model builder
 # ----------------------------
-def _ffn(x, d_token: int, ff_mult: int, dropout: float):
+def _ffn(x, d_token: int, ff_mult: int, dropout: float, *, prefix: str):
     d_hidden = int(d_token * ff_mult)
-    x2 = layers.Dense(d_hidden, activation=tf.keras.activations.gelu)(x)
-    x2 = layers.Dropout(dropout)(x2)
-    x2 = layers.Dense(d_token)(x2)
+    x2 = layers.Dense(
+        d_hidden,
+        activation=tf.keras.activations.gelu,
+        name=f"{prefix}_dense_1",
+    )(x)
+    x2 = layers.Dropout(dropout, name=f"{prefix}_inner_dropout")(x2)
+    x2 = layers.Dense(d_token, name=f"{prefix}_dense_2")(x2)
     return x2
 
-def _transformer_block(x, *, d_token, n_heads, attn_dropout, ff_dropout, resid_dropout):
+
+def _transformer_block(x, *, d_token, n_heads, attn_dropout, ff_dropout, resid_dropout, block_idx: int):
+    prefix = f"block_{block_idx}"
+
     # PreNorm attention
-    xn = layers.LayerNormalization()(x)
+    xn = layers.LayerNormalization(name=f"{prefix}_attn_ln")(x)
     attn = layers.MultiHeadAttention(
         num_heads=int(n_heads),
         key_dim=int(d_token // n_heads),
         dropout=float(attn_dropout),
+        name=f"{prefix}_mha",
     )(xn, xn)
-    attn = layers.Dropout(float(resid_dropout))(attn)
-    x = layers.Add()([x, attn])
+    attn = layers.Dropout(float(resid_dropout), name=f"{prefix}_attn_dropout")(attn)
+    x = layers.Add(name=f"{prefix}_attn_add")([x, attn])
 
     # PreNorm FFN
-    xn = layers.LayerNormalization()(x)
-    ff = _ffn(xn, int(d_token), int(FT_CFG["ff_mult"]), float(ff_dropout))
-    ff = layers.Dropout(float(resid_dropout))(ff)
-    x = layers.Add()([x, ff])
+    xn = layers.LayerNormalization(name=f"{prefix}_ffn_ln")(x)
+    ff = _ffn(
+        xn,
+        int(d_token),
+        int(FT_CFG["ff_mult"]),
+        float(ff_dropout),
+        prefix=f"{prefix}_ffn",
+    )
+    ff = layers.Dropout(float(resid_dropout), name=f"{prefix}_ffn_dropout")(ff)
+    x = layers.Add(name=f"{prefix}_ffn_add")([x, ff])
     return x
+
 
 def build_ft_transformer_model(lr_schedule):
     # Inputs
     numeric_in = keras.Input(shape=(len(num_cols_nn),), name="numeric", dtype=tf.float32)
     cat_in = {c: keras.Input(shape=(), name=c, dtype=tf.string) for c in cat_cols_nn}
 
-    # Frozen numeric normalization
-    num_norm_local = layers.Normalization(name="num_norm")
-    num_norm_local.build((None, len(num_cols_nn)))
-    num_norm_local.set_weights(NUM_NORM_WEIGHTS)
-
-    x_num = num_norm_local(numeric_in)  # (N, D_num)
+    # numeric_in is already standardized outside the model
+    x_num = numeric_in
 
     d_token = int(FT_CFG["d_token"])
     num_tokens = int(FT_CFG.get("num_tokens", 1))
 
     # Numeric tokenization
-    # num_tokens = 1 -> current behavior
-    # num_tokens > 1 -> learned k-token projection
     if num_tokens == 1:
-        num_token_block = layers.Dense(d_token, name="num_token_proj")(x_num)
-        num_token_block = layers.Reshape((1, d_token), name="num_token_reshape")(num_token_block)
+        num_token_block = layers.Dense(
+            d_token,
+            name="num_token_proj",
+        )(x_num)
+        num_token_block = layers.Reshape(
+            (1, d_token),
+            name="num_token_reshape",
+        )(num_token_block)
     else:
         num_token_block = layers.Dense(
             num_tokens * d_token,
-            name=f"num_token_proj_{num_tokens}x{d_token}"
+            name=f"num_token_proj_{num_tokens}x{d_token}",
         )(x_num)
         num_token_block = layers.Reshape(
             (num_tokens, d_token),
-            name=f"num_token_reshape_{num_tokens}"
+            name=f"num_token_reshape_{num_tokens}",
         )(num_token_block)
 
-    # Categorical tokens: one token per categorical feature
+    # Categorical tokens
     cat_tokens = []
     for c in cat_cols_nn:
         lk = layers.StringLookup(
+            vocabulary=LOOKUP_VOCABS[c],   
             output_mode="int",
             mask_token=None,
             num_oov_indices=1,
@@ -2362,21 +2394,25 @@ def build_ft_transformer_model(lr_schedule):
         )
         lk.set_vocabulary(LOOKUP_VOCABS[c])
 
-        ids = lk(cat_in[c])  # (N,)
+        ids = lk(cat_in[c])
         emb = layers.Embedding(
             input_dim=lk.vocabulary_size(),
             output_dim=d_token,
             name=f"{c}_emb_token",
-        )(ids)  # (N, d_token)
+        )(ids)
 
-        emb = layers.Dropout(float(FT_CFG["embed_dropout"]))(emb)
-        emb = layers.Reshape((1, d_token), name=f"{c}_emb_reshape")(emb)  # (N,1,d_token)
+        emb = layers.Dropout(
+            float(FT_CFG["embed_dropout"]),
+            name=f"{c}_emb_dropout",
+        )(emb)
+        emb = layers.Reshape(
+            (1, d_token),
+            name=f"{c}_emb_reshape",
+        )(emb)
         cat_tokens.append(emb)
 
-    # Token sequence: numeric tokens + categorical tokens => (N, T, d_token)
     x = layers.Concatenate(axis=1, name="token_concat")([num_token_block] + cat_tokens)
 
-    # Transformer blocks
     for i in range(int(FT_CFG["n_blocks"])):
         x = _transformer_block(
             x,
@@ -2385,17 +2421,22 @@ def build_ft_transformer_model(lr_schedule):
             attn_dropout=float(FT_CFG["attn_dropout"]),
             ff_dropout=float(FT_CFG["ff_dropout"]),
             resid_dropout=float(FT_CFG["resid_dropout"]),
+            block_idx=i,
         )
 
-    # Pool tokens (mean pooling)
     x = layers.LayerNormalization(name="final_ln")(x)
-    x = layers.GlobalAveragePooling1D(name="token_mean_pool")(x)  # (N, d_token)
+    x = layers.GlobalAveragePooling1D(name="token_mean_pool")(x)
 
-    # Head
-    x = layers.Dense(d_token, activation=tf.keras.activations.gelu)(x)
-    x = layers.Dropout(float(FT_CFG.get("head_dropout", 0.10)))(x)
+    x = layers.Dense(
+        d_token,
+        activation=tf.keras.activations.gelu,
+        name="head_dense",
+    )(x)
+    x = layers.Dropout(
+        float(FT_CFG.get("head_dropout", 0.10)),
+        name="head_dropout",
+    )(x)
 
-    # initialize predictions near the training median (log1p space)
     y0 = float(np.median(y_train_nn))
 
     out = layers.Dense(
@@ -2404,7 +2445,11 @@ def build_ft_transformer_model(lr_schedule):
         name="pred_log1p",
     )(x)
 
-    model = keras.Model(inputs={"numeric": numeric_in, **cat_in}, outputs=out, name="ft_transformer_reg")
+    model = keras.Model(
+        inputs={"numeric": numeric_in, **cat_in},
+        outputs=out,
+        name="ft_transformer_reg",
+    )
 
     opt = keras.optimizers.AdamW(
         learning_rate=lr_schedule,
@@ -2428,13 +2473,6 @@ def build_ft_transformer_model(lr_schedule):
 # ==========================================================
 # Step 5.5: Optional KerasTuner
 # ==========================================================
-
-# ----------------------------
-# Import (only if tuning is enabled)
-# ----------------------------
-if TUNE:
-    import keras_tuner as kt
-
 
 # ----------------------------------------------------------
 # 1) Prepare smoke/full datasets
@@ -2598,7 +2636,7 @@ def run_tuner_for_mode(mode: str):
     # Use the exact run data this mode will use
     train_inputs_run, val_inputs_run, y_train_run, y_val_run = get_run_data_for_mode(mode)
 
-    # Trial epoch budget by mode (keep short)
+    # Trial epoch budget by mode 
     trial_epochs = int(TUNER_EPOCHS_SMOKE if mode == "smoke" else TUNER_EPOCHS_FULL)
 
     # tuner directory
@@ -2713,6 +2751,18 @@ history = None
 KERAS_RUN_DIR = None
 model = None
 
+# Canonical evaluation references
+KERAS_EVAL_ARTIFACT_DIR = None         # points to KERAS_DIR for latest, or run dir for versioned run
+KERAS_EVAL_ARTIFACT_KIND = None        # "latest" | "run"
+KERAS_MODEL_SOURCE = None              # "latest_loaded" | "trained_this_run" | None
+
+# Weights-based latest artifact paths
+KERAS_LATEST_WEIGHTS_PATH = KERAS_DIR / "keras_model.weights.h5"
+KERAS_LATEST_RUN_INFO_PATH = KERAS_DIR / "keras_run_info.json"
+KERAS_LATEST_TRAIN_MEDIANS_PATH = KERAS_DIR / "keras_train_medians.json"
+KERAS_LATEST_NUM_NORM_WEIGHTS_PATH = KERAS_DIR / "keras_num_norm_weights.json"
+KERAS_LATEST_LOOKUP_VOCABS_PATH = KERAS_DIR / "keras_lookup_vocabs.json"
+
 def make_callbacks(train_mode: str):
     ES_PAT = FT_CFG["es_patience_smoke"] if train_mode == "smoke" else FT_CFG["es_patience_full"]
     return [
@@ -2724,34 +2774,226 @@ def make_callbacks(train_mode: str):
         ),
     ]
 
+def _keras_latest_exists_weights() -> bool:
+    return (
+        KERAS_LATEST_WEIGHTS_PATH.exists()
+        and KERAS_LATEST_RUN_INFO_PATH.exists()
+        and KERAS_LATEST_TRAIN_MEDIANS_PATH.exists()
+        and KERAS_LATEST_NUM_NORM_STATS_PATH.exists()
+        and KERAS_LATEST_LOOKUP_VOCABS_PATH.exists()
+    )
+
+def _keras_artifact_paths(base_dir: Path, kind: str) -> dict:
+    if kind == "latest":
+        return {
+            "weights": KERAS_LATEST_WEIGHTS_PATH,
+            "run_info": KERAS_LATEST_RUN_INFO_PATH,
+            "train_medians": KERAS_LATEST_TRAIN_MEDIANS_PATH,
+            "num_norm_stats": KERAS_LATEST_NUM_NORM_STATS_PATH,
+            "lookup_vocabs": KERAS_LATEST_LOOKUP_VOCABS_PATH,
+        }
+    elif kind == "run":
+        return {
+            "weights": base_dir / "keras_model.weights.h5",
+            "run_info": base_dir / "run_info.json",
+            "train_medians": base_dir / "train_medians.json",
+            "num_norm_stats": base_dir / "num_norm_stats.json",
+            "lookup_vocabs": base_dir / "lookup_vocabs.json",
+        }
+    else:
+        raise ValueError(f"Unknown Keras artifact kind: {kind}")
+
+def _save_keras_rebuild_artifacts(
+    *,
+    base_dir: Path,
+    kind: str,
+    run_info: dict,
+    train_medians_series: pd.Series,
+    train_num_mean_series: pd.Series,
+    train_num_std_series: pd.Series,
+    lookup_vocabs: dict,
+):
+    p = _keras_artifact_paths(base_dir, kind)
+
+    atomic_write_json(p["run_info"], run_info)
+    atomic_write_json(
+        p["train_medians"],
+        {k: float(v) for k, v in train_medians_series.to_dict().items()}
+    )
+    atomic_write_json(
+        p["num_norm_stats"],
+        {
+            "mean": {k: float(v) for k, v in train_num_mean_series.to_dict().items()},
+            "std": {k: float(v) for k, v in train_num_std_series.to_dict().items()},
+        }
+    )
+    atomic_write_json(
+        p["lookup_vocabs"],
+        lookup_vocabs
+    )
+
+def _load_keras_rebuild_artifacts(*, base_dir: Path, kind: str) -> dict:
+    p = _keras_artifact_paths(base_dir, kind)
+
+    run_info = json.loads(p["run_info"].read_text())
+    train_medians_saved = json.loads(p["train_medians"].read_text())
+    num_norm_stats_saved = json.loads(p["num_norm_stats"].read_text())
+    lookup_vocabs_saved = json.loads(p["lookup_vocabs"].read_text())
+
+    return {
+        "paths": p,
+        "run_info": run_info,
+        "train_medians": {k: float(v) for k, v in train_medians_saved.items()},
+        "num_cols": list(run_info["num_cols"]),
+        "cat_cols": list(run_info["cat_cols"]),
+        "ft_cfg": dict(run_info["ft_cfg"]),
+        "num_norm_mean": {k: float(v) for k, v in num_norm_stats_saved["mean"].items()},
+        "num_norm_std": {k: float(v) for k, v in num_norm_stats_saved["std"].items()},
+        "lookup_vocabs": lookup_vocabs_saved,
+    }
+
+def _prepare_inputs_for_saved_artifacts(
+    Xdf: pd.DataFrame,
+    *,
+    num_cols_saved: list[str],
+    cat_cols_saved: list[str],
+    train_medians_saved: dict,
+    num_norm_mean_saved: dict,
+    num_norm_std_saved: dict,
+) -> dict:
+    X_local = Xdf.copy()
+
+    for col in num_cols_saved:
+        if col not in X_local.columns and col.endswith("_missing"):
+            base = col[:-8]
+            if base in X_local.columns:
+                X_local[col] = X_local[base].isna().astype("int64")
+
+    missing_num = [c for c in num_cols_saved if c not in X_local.columns]
+    missing_cat = [c for c in cat_cols_saved if c not in X_local.columns]
+
+    if missing_num:
+        raise ValueError(f"Missing numeric columns required by saved Keras model: {missing_num}")
+    if missing_cat:
+        raise ValueError(f"Missing categorical columns required by saved Keras model: {missing_cat}")
+
+    X_local[num_cols_saved] = X_local[num_cols_saved].fillna(train_medians_saved)
+
+    mean_s = pd.Series(num_norm_mean_saved, index=num_cols_saved)
+    std_s = pd.Series(num_norm_std_saved, index=num_cols_saved)
+    X_local[num_cols_saved] = (X_local[num_cols_saved] - mean_s) / std_s
+
+    for c in cat_cols_saved:
+        X_local[c] = X_local[c].fillna("unknown").astype(str)
+
+    out = {
+        "numeric": tf.convert_to_tensor(
+            X_local[num_cols_saved].to_numpy(dtype=np.float32),
+            dtype=tf.float32
+        )
+    }
+    for c in cat_cols_saved:
+        out[c] = tf.convert_to_tensor(
+            X_local[c].astype(str).to_numpy(),
+            dtype=tf.string
+        )
+    return out
+
+def _rebuild_and_load_keras_model_from_artifacts(*, base_dir: Path, kind: str):
+    art = _load_keras_rebuild_artifacts(base_dir=base_dir, kind=kind)
+
+    global FT_CFG, num_cols_nn, cat_cols_nn, LOOKUP_VOCABS
+
+    _FT_CFG_backup = dict(FT_CFG)
+    _num_cols_backup = list(num_cols_nn)
+    _cat_cols_backup = list(cat_cols_nn)
+    _LOOKUP_VOCABS_backup = LOOKUP_VOCABS
+
+    try:
+        tf.keras.backend.clear_session()
+        gc.collect()
+
+        FT_CFG = dict(art["ft_cfg"])
+        num_cols_nn = list(art["num_cols"])
+        cat_cols_nn = list(art["cat_cols"])
+        LOOKUP_VOCABS = art["lookup_vocabs"]
+
+        train_mode_saved = art["run_info"]["train_mode"]
+        n_train_rows_saved = int(art["run_info"]["train_rows"])
+
+        batch_eff = min(
+            int(FT_CFG["batch_smoke"] if train_mode_saved == "smoke" else FT_CFG["batch_full"]),
+            n_train_rows_saved
+        )
+        epochs_saved = int(FT_CFG["epochs_smoke"] if train_mode_saved == "smoke" else FT_CFG["epochs_full"])
+        steps_per_epoch = max(1, int(np.ceil(n_train_rows_saved / batch_eff)))
+        total_steps = max(1, int(steps_per_epoch * epochs_saved))
+        warmup_steps = max(1, int(float(FT_CFG["warmup_frac"]) * total_steps))
+
+        lr_schedule = WarmupCosine(
+            base_lr=float(FT_CFG["lr"]),
+            warmup_steps=warmup_steps,
+            total_steps=total_steps,
+            min_lr=float(FT_CFG["min_lr"]),
+        )
+
+        model_loaded = build_ft_transformer_model(lr_schedule)
+        model_loaded.load_weights(art["paths"]["weights"])
+
+        # optional debug
+        w = model_loaded.get_weights()
+        print("DEBUG weight tensors:", len(w))
+        print("DEBUG first weight mean/std:", float(np.mean(w[0])), float(np.std(w[0])))
+        print("DEBUG last weight mean/std:", float(np.mean(w[-1])), float(np.std(w[-1])))
+
+    finally:
+        FT_CFG = _FT_CFG_backup
+        num_cols_nn = _num_cols_backup
+        cat_cols_nn = _cat_cols_backup
+        LOOKUP_VOCABS = _LOOKUP_VOCABS_backup
+
+    return model_loaded, art
+
+SHOULD_TRAIN_KERAS = (
+    (TRAIN_MODE == "smoke") or
+    (TRAIN_MODE == "full" and (RETRAIN_KERAS or (not _keras_latest_exists_weights())))
+)
+
 # 1) SKIP
 if TRAIN_MODE == "skip":
-    if _keras_latest_exists():
-        print("✅ TRAIN_MODE='skip' — loading latest Keras model:\n ", latest_path)
-        model = keras.models.load_model(
-            latest_path,
-            compile=False,
-            custom_objects={"RMSEDollars": RMSEDollars, "WarmupCosine": WarmupCosine}
+    if _keras_latest_exists_weights():
+        print("✅ TRAIN_MODE='skip' — loading latest Keras weights:\n ", KERAS_LATEST_WEIGHTS_PATH)
+        model, latest_art = _rebuild_and_load_keras_model_from_artifacts(
+            base_dir=KERAS_DIR,
+            kind="latest",
         )
+
+        KERAS_EVAL_ARTIFACT_DIR = KERAS_DIR
+        KERAS_EVAL_ARTIFACT_KIND = "latest"
+        KERAS_MODEL_SOURCE = "latest_loaded"
+
     else:
-        print("⏭️ TRAIN_MODE='skip' — no latest Keras model found, skipping.")
+        print("⏭️ TRAIN_MODE='skip' — no latest Keras weights found, skipping.")
         model = None
 
 # 2) FULL + no retrain
-elif (TRAIN_MODE == "full") and _keras_latest_exists() and (not RETRAIN_KERAS):
-    print("✅ Loading existing Keras latest model (RETRAIN_KERAS=False, TRAIN_MODE='full'):\n ", latest_path)
-    model = keras.models.load_model(
-        latest_path,
-        compile=False,
-        custom_objects={"RMSEDollars": RMSEDollars, "WarmupCosine": WarmupCosine}
+elif (TRAIN_MODE == "full") and _keras_latest_exists_weights() and (not RETRAIN_KERAS):
+    print("✅ Loading existing Keras latest weights (RETRAIN_KERAS=False, TRAIN_MODE='full'):\n ", KERAS_LATEST_WEIGHTS_PATH)
+    model, latest_art = _rebuild_and_load_keras_model_from_artifacts(
+        base_dir=KERAS_DIR,
+        kind="latest",
     )
+
+    KERAS_EVAL_ARTIFACT_DIR = KERAS_DIR
+    KERAS_EVAL_ARTIFACT_KIND = "latest"
+    KERAS_MODEL_SOURCE = "latest_loaded"
 
 # 3) Otherwise: TRAIN
 else:
-    if not WILL_TRAIN_KERAS:
+    if not SHOULD_TRAIN_KERAS:
         raise RuntimeError(
-            "Keras training branch entered, but WILL_TRAIN_KERAS=False. "
-            "Check WILL_TRAIN_KERAS logic vs TRAIN_MODE/RETRAIN_KERAS/latest_path."
+            "Keras training branch entered, but SHOULD_TRAIN_KERAS=False. "
+            "Check Keras weights-based load/train logic vs TRAIN_MODE/RETRAIN_KERAS/latest weights."
         )
 
     BATCH  = FT_CFG["batch_smoke"] if TRAIN_MODE == "smoke" else FT_CFG["batch_full"]
@@ -2764,8 +3006,8 @@ else:
     KERAS_RUN_DIR = KERAS_RUNS_DIR / run_dir_name(run_ts, TRAIN_MODE)
     KERAS_RUN_DIR.mkdir(parents=True, exist_ok=True)
 
-    versioned_path = KERAS_RUN_DIR / "keras_model.keras"
-    best_dollars_path = KERAS_RUN_DIR / "best_by_val_rmse_dollars.keras"
+    versioned_weights_path = KERAS_RUN_DIR / "keras_model.weights.h5"
+    best_dollars_path = KERAS_RUN_DIR / "best_by_val_rmse_dollars.weights.h5"  # optional, not currently written
 
     # Run info
     run_info = {
@@ -2780,11 +3022,16 @@ else:
         "ft_cfg": dict(FT_CFG),
         "note": "FT-Transformer with WarmupCosine LR schedule and RMSE($) metric for early stopping",
     }
-    atomic_write_json(KERAS_RUN_DIR / "run_info.json", run_info)
 
-    atomic_write_json(
-        KERAS_RUN_DIR / "train_medians.json",
-        {k: float(v) for k, v in train_medians.to_dict().items()}
+    # Save rebuild artifacts for this run before weight save/load checks.
+    _save_keras_rebuild_artifacts(
+        base_dir=KERAS_RUN_DIR,
+        kind="run",
+        run_info=run_info,
+        train_medians_series=train_medians,
+        train_num_mean_series=train_num_mean,
+        train_num_std_series=train_num_std,
+        lookup_vocabs=LOOKUP_VOCABS,
     )
 
     if TRAIN_MODE == "smoke":
@@ -2866,7 +3113,7 @@ else:
     print("MODEL OBJECT ID:", id(model))
     print("HISTORY LEN:", len(history.history["loss"]))
     print("RUN DIR:", KERAS_RUN_DIR)
-    print("LATEST PATH EXISTS:", latest_path.exists())
+    print("LATEST WEIGHTS EXIST:", KERAS_LATEST_WEIGHTS_PATH.exists())
 
     print("After fit: last val_rmse_dollars =", history.history["val_rmse_dollars"][-1])
     print("----------------------------")
@@ -2874,20 +3121,210 @@ else:
     print("----------------------------")
     # ----------------------------
 
-    # Remember which model was just trained so evaluation uses the same one
-    trained_model_path = versioned_path
+    # Save versioned weights only
+    model.save_weights(versioned_weights_path)
+    print("💾 Saved versioned weights:", versioned_weights_path)
 
-    # Save versioned always
-    model.save(versioned_path, include_optimizer=False)
-    print("💾 Saved versioned model:", versioned_path)
+    # Canonical evaluation now points to the run artifact directory, not a .keras model file.
+    KERAS_EVAL_ARTIFACT_DIR = KERAS_RUN_DIR
+    KERAS_EVAL_ARTIFACT_KIND = "run"
+    KERAS_MODEL_SOURCE = "trained_this_run"
 
-    # Update latest only for FULL
-    # if _touches_latest():
-    #     print("ℹ️ Full run: latest not updated automatically (decide after comparing checkpoints).")
+    # ----------------------------
+    # DIRECT POST-FIT TEST CHECK
+    # ----------------------------
+    true_test_direct = np.expm1(y_test_nn.astype("float64"))
 
+    pred_test_direct = np.expm1(
+        model.predict(
+            test_inputs_tf,
+            batch_size=int(FT_CFG["pred_batch"]),
+            verbose=0
+        ).reshape(-1).astype("float64")
+    )
+
+    direct_test_m = metrics_full_and_clipped(true_test_direct, pred_test_direct, q_low=0.01, q_high=0.99)
+    display(metrics_to_df(direct_test_m, "FT-Transformer (Test) [direct in-memory]"))
+
+    # Immediate rebuild + weights reload check
+    model_reloaded_check, art_check = _rebuild_and_load_keras_model_from_artifacts(
+        base_dir=KERAS_RUN_DIR,
+        kind="run",
+    )
+
+    # build the inputs for the reloaded model
+    test_inputs_tf_check = _prepare_inputs_for_saved_artifacts(
+        X_test,
+        num_cols_saved=art_check["num_cols"],
+        cat_cols_saved=art_check["cat_cols"],
+        train_medians_saved=art_check["train_medians"],
+        num_norm_mean_saved=art_check["num_norm_mean"],
+        num_norm_std_saved=art_check["num_norm_std"],
+    )
+
+    # ----------------------------
+    # DEBUG INTERMEDIATE LAYER CHECK
+    # ----------------------------
+    print("----------------------------")
+    print("DEBUG INTERMEDIATE LAYER CHECK")
+    print("----------------------------")
+
+    same_inputs_small = {k: v[:32] for k, v in test_inputs_tf.items()}
+
+    def compare_layer(layer_name: str):
+        probe1 = keras.Model(model.inputs, model.get_layer(layer_name).output)
+        probe2 = keras.Model(model_reloaded_check.inputs, model_reloaded_check.get_layer(layer_name).output)
+
+        out1 = probe1.predict(same_inputs_small, verbose=0)
+        out2 = probe2.predict(same_inputs_small, verbose=0)
+
+        print(
+            layer_name,
+            "| shape:", out1.shape,
+            "| allclose:", np.allclose(out1, out2),
+            "| max abs diff:", float(np.max(np.abs(out1 - out2)))
+        )
+
+    # numeric preprocessing
+    # compare_layer("num_norm")
+
+    # one categorical embedding path
+    compare_layer("manufacturer_emb_token")
+    compare_layer("manufacturer_emb_reshape")
+
+    # token assembly / transformer / head
+    compare_layer("token_concat")
+    compare_layer("final_ln")
+    compare_layer("token_mean_pool")
+    compare_layer("head_dense")
+    compare_layer("pred_log1p")
+
+    print("----------------------------")
+    print("DEBUG INTERMEDIATE LAYER CHECK ENDS")
+    print("----------------------------")
+    # ----------------------------
+    # DEBUG INPUT TENSOR CHECK
+    # ----------------------------
+    print("----------------------------")
+    print("DEBUG INPUT TENSOR CHECK")
+    print("----------------------------")
+
+    x_num_1 = test_inputs_tf["numeric"].numpy()
+    x_num_2 = test_inputs_tf_check["numeric"].numpy()
+
+    print("numeric shape equal:", x_num_1.shape == x_num_2.shape)
+    print("numeric allclose:", np.allclose(x_num_1, x_num_2))
+    print("numeric max abs diff:", float(np.max(np.abs(x_num_1 - x_num_2))))
+
+    print("numeric first row original:", x_num_1[0, :10])
+    print("numeric first row reload:  ", x_num_2[0, :10])
+
+    for c in cat_cols_nn:
+        a = test_inputs_tf[c].numpy()
+        b = test_inputs_tf_check[c].numpy()
+        print(c, "tensor equal:", np.array_equal(a, b))
+
+    # also test predictions using identical tensors
+    same_inputs = test_inputs_tf
+
+    pred_same_inmem = np.expm1(
+        model.predict(
+            same_inputs,
+            batch_size=int(FT_CFG["pred_batch"]),
+            verbose=0
+        ).reshape(-1).astype("float64")
+    )
+
+    pred_same_reload = np.expm1(
+        model_reloaded_check.predict(
+            same_inputs,
+            batch_size=int(FT_CFG["pred_batch"]),
+            verbose=0
+        ).reshape(-1).astype("float64")
+    )
+
+    print("same-input predictions allclose:", np.allclose(pred_same_inmem, pred_same_reload))
+    print("same-input prediction max abs diff:", float(np.max(np.abs(pred_same_inmem - pred_same_reload))))
+
+    print("----------------------------")
+    print("DEBUG INPUT TENSOR CHECK ENDS")
+    print("----------------------------")
+    # ----------------------------
+
+    print("----------------------------")
+    print("DEBUG LOOKUP VOCAB CHECK")
+    print("----------------------------")
+    for c in cat_cols_nn:
+        v1 = model.get_layer(f"{c}_lookup").get_vocabulary()[:10]
+        v2 = model_reloaded_check.get_layer(f"{c}_lookup").get_vocabulary()[:10]
+        print(c, v1 == v2, v1[:5], v2[:5])
+    print("----------------------------")
+    print("DEBUG LOOKUP VOCAB CHECK ENDS")
+    print("----------------------------")
+
+    print("----------------------------")
+    print("DEBUG LOOKUP ID CHECK")
+    print("----------------------------")
+    sample_inputs = {k: v[:8] for k, v in test_inputs_tf.items()}
+
+    for c in cat_cols_nn:
+        probe1 = keras.Model(model.inputs, model.get_layer(f"{c}_lookup").output)
+        probe2 = keras.Model(model_reloaded_check.inputs, model_reloaded_check.get_layer(f"{c}_lookup").output)
+
+        ids1 = probe1.predict(sample_inputs, verbose=0).reshape(-1)
+        ids2 = probe2.predict(sample_inputs, verbose=0).reshape(-1)
+
+        print(c, "ids equal:", np.array_equal(ids1, ids2), "ids1:", ids1[:8], "ids2:", ids2[:8])
+
+    print("----------------------------")
+    print("DEBUG LOOKUP ID CHECK ENDS")
+    print("----------------------------")
+
+    pred_test_reloaded = np.expm1(
+        model_reloaded_check.predict(
+            test_inputs_tf,
+            batch_size=int(FT_CFG["pred_batch"]),
+            verbose=0
+        ).reshape(-1).astype("float64")
+    )
+
+    reloaded_test_m = metrics_full_and_clipped(true_test_direct, pred_test_reloaded, q_low=0.01, q_high=0.99)
+    display(metrics_to_df(reloaded_test_m, "FT-Transformer (Test) [immediate reload]"))
+
+    print("Reload allclose:", np.allclose(pred_test_direct, pred_test_reloaded))
+    print("Reload max abs diff:", np.max(np.abs(pred_test_direct - pred_test_reloaded)))
+
+    print("----------------------------")
+    print("DEBUG SECTION")
+    print("----------------------------")
+
+    # DEBUG: compare weights between trained model and reloaded model
+    w1 = model.get_weights()
+    w2 = model_reloaded_check.get_weights()
+
+    diff = np.max([np.max(np.abs(a - b)) for a, b in zip(w1, w2)])
+    print("DEBUG weight max abs diff:", diff)
+
+    print("----------------------------")
+    print("DEBUG SECTION ENDS")
+    print("----------------------------")
+    # ----------------------------
+
+    # Update latest ONLY for FULL, and copy the rebuild artifacts alongside latest weights.
     if _touches_latest():
-        model.save(latest_path, include_optimizer=False)
-        print("✅ Updated latest model:", latest_path)
+        model.save_weights(KERAS_LATEST_WEIGHTS_PATH)
+
+        _save_keras_rebuild_artifacts(
+            base_dir=KERAS_DIR,
+            kind="latest",
+            run_info=run_info,
+            train_medians_series=train_medians,
+            train_num_mean_series=train_num_mean,
+            train_num_std_series=train_num_std,
+            lookup_vocabs=LOOKUP_VOCABS,
+        )
+
+        print("✅ Updated latest Keras weights:", KERAS_LATEST_WEIGHTS_PATH)
     else:
         print("🚫 Smoke run: NOT updating latest pointer.")
 ```
@@ -2897,74 +3334,90 @@ else:
 # ----------------------------
 # Step 7: Evaluation (dollars) 
 # ----------------------------
+model_eval = None
+
 if ("model" not in globals()) or (model is None):
     print("⚠️ Keras model is not available — skipping evaluation.")
 else:
-    # -------------------------------------------------
-    # Ensure evaluation uses the intended model
-    # -------------------------------------------------
-    will_train = bool(globals().get("WILL_TRAIN_KERAS", False))
+    if ("KERAS_EVAL_ARTIFACT_DIR" in globals()) and (KERAS_EVAL_ARTIFACT_DIR is not None):
+        print("Loading Keras weights for evaluation from:", KERAS_EVAL_ARTIFACT_DIR)
+        print("Keras model source:", KERAS_MODEL_SOURCE)
+        print("Keras artifact kind:", KERAS_EVAL_ARTIFACT_KIND)
 
-    if will_train:
-        print("Using in-memory trained model for evaluation")
-        model_eval = model
-    else:
-        # Make WILL_TRAIN_KERAS unambiguous for this path
-        WILL_TRAIN_KERAS = False
+        model_eval, eval_art = _rebuild_and_load_keras_model_from_artifacts(
+            base_dir=KERAS_EVAL_ARTIFACT_DIR,
+            kind=KERAS_EVAL_ARTIFACT_KIND,
+        )
 
-        if "trained_model_path" not in globals():
-            raise NameError(
-                "trained_model_path is not defined. "
-                "Set trained_model_path = versioned_path right after fit() (and before evaluation)."
+        # If this model was trained in the current run, use the same already-prepared
+        # tensors used during training so evaluation is perfectly aligned.
+        if KERAS_MODEL_SOURCE == "trained_this_run":
+            test_inputs_tf_eval = test_inputs_tf
+
+            X_trainval_eval_df = pd.concat([X_train_nn, X_val_nn], axis=0)
+            y_trainval_eval = np.concatenate([y_train_nn, y_val_nn], axis=0)
+            trainval_inputs_tf_eval = to_input_dict_tf(to_input_dict_np(X_trainval_eval_df))
+
+            pred_batch_eval = int(FT_CFG["pred_batch"])
+
+        else:
+            # For loaded historical/latest artifacts, rebuild inputs from saved artifacts.
+            test_inputs_tf_eval = _prepare_inputs_for_saved_artifacts(
+                X_test,
+                num_cols_saved=eval_art["num_cols"],
+                cat_cols_saved=eval_art["cat_cols"],
+                train_medians_saved=eval_art["train_medians"],
+                num_norm_mean_saved=eval_art["num_norm_mean"],
+                num_norm_std_saved=eval_art["num_norm_std"],
             )
 
-        print("Loading model for evaluation from:", trained_model_path)
+            X_trainval_eval_df = pd.concat([X_train, X_val], axis=0)
+            y_trainval_eval = np.concatenate([y_train_nn, y_val_nn], axis=0)
 
-        if not Path(trained_model_path).exists():
-            raise FileNotFoundError(f"trained_model_path not found: {trained_model_path}")
+            trainval_inputs_tf_eval = _prepare_inputs_for_saved_artifacts(
+                X_trainval_eval_df,
+                num_cols_saved=eval_art["num_cols"],
+                cat_cols_saved=eval_art["cat_cols"],
+                train_medians_saved=eval_art["train_medians"],
+                num_norm_mean_saved=eval_art["num_norm_mean"],
+                num_norm_std_saved=eval_art["num_norm_std"],
+            )
 
-        model_eval = keras.models.load_model(
-            trained_model_path,
-            compile=False,
-            custom_objects={
-                "RMSEDollars": RMSEDollars,
-                "WarmupCosine": WarmupCosine,
-            },
-        )
+            pred_batch_eval = int(eval_art["ft_cfg"]["pred_batch"])
+
+    else:
+        print("ℹ️ KERAS_EVAL_ARTIFACT_DIR not set — using in-memory model + current inputs for evaluation.")
+        model_eval = model
+        test_inputs_tf_eval = test_inputs_tf
+
+        X_trainval_eval_df = pd.concat([X_train_nn, X_val_nn], axis=0)
+        y_trainval_eval = np.concatenate([y_train_nn, y_val_nn], axis=0)
+        trainval_inputs_tf_eval = to_input_dict_tf(to_input_dict_np(X_trainval_eval_df))
+
+        pred_batch_eval = int(FT_CFG["pred_batch"])
 
     def predict_dollars(inputs_tf: dict) -> np.ndarray:
         pred_log = model_eval.predict(
             inputs_tf,
-            batch_size=int(FT_CFG["pred_batch"]),
+            batch_size=pred_batch_eval,
             verbose=0
         ).reshape(-1)
         return np.expm1(pred_log.astype("float64"))
 
-    # ----------------------------
-    # TEST metrics (full + clipped)
-    # ----------------------------
     true_test = np.expm1(y_test_nn.astype("float64"))
-    pred_test = predict_dollars(test_inputs_tf)
+    pred_test = predict_dollars(test_inputs_tf_eval)
 
     keras_test_m = metrics_full_and_clipped(true_test, pred_test, q_low=0.01, q_high=0.99)
     display(metrics_to_df(keras_test_m, "FT-Transformer (Test)"))
 
-    # ----------------------------
-    # Train+Val metrics (full + clipped)
-    # ----------------------------
-    X_trainval_nn = pd.concat([X_train_nn, X_val_nn], axis=0)
-    y_trainval_nn = np.concatenate([y_train_nn, y_val_nn], axis=0)
-    trainval_inputs_tf = to_input_dict_tf(to_input_dict_np(X_trainval_nn))
-
-    true_trainval = np.expm1(y_trainval_nn.astype("float64"))
-    pred_trainval = predict_dollars(trainval_inputs_tf)
+    true_trainval = np.expm1(y_trainval_eval.astype("float64"))
+    pred_trainval = predict_dollars(trainval_inputs_tf_eval)
 
     keras_trainval_m = metrics_full_and_clipped(true_trainval, pred_trainval, q_low=0.01, q_high=0.99)
     display(metrics_to_df(keras_trainval_m, "FT-Transformer (Train+Val)"))
 
     print(true_trainval.shape, pred_trainval.shape, true_test.shape, pred_test.shape)
 
-    # Globals for metrics writer block 
     keras_test_full = keras_test_m["full"]
     keras_test_clipped = keras_test_m["clipped"]
     keras_trainval_full = keras_trainval_m["full"]
@@ -3149,9 +3602,6 @@ else:
     # except Exception as e:
     #     print("⚠️ Permutation importance failed:", e)
 
-    # ----------------------------
-    # Training curves (if this run trained in-session)
-    # ----------------------------
     if ("history" in globals()) and (history is not None):
         hist = history.history if hasattr(history, "history") else {}
         if ("loss" in hist) or ("val_loss" in hist) or ("rmse_dollars" in hist) or ("val_rmse_dollars" in hist):
@@ -3186,41 +3636,13 @@ else:
 
     print("✅ Done: FT-Transformer trained/loaded and evaluated.")
 
-    # -------------------------------------------------
-    # Optional: Evaluate "best by val_rmse_dollars" checkpoint
-    # -------------------------------------------------
     if "best_dollars_path" in globals() and Path(best_dollars_path).exists():
-        print("Loading best-by-dollars checkpoint:", best_dollars_path)
-
-        model_best_dollars = keras.models.load_model(
-            best_dollars_path,
-            compile=False,
-            custom_objects={
-                "RMSEDollars": RMSEDollars,
-                "WarmupCosine": WarmupCosine,
-            },
-        )
-
-        def predict_dollars_with(m, inputs_tf: dict) -> np.ndarray:
-            pred_log = m.predict(inputs_tf, batch_size=int(FT_CFG["pred_batch"]), verbose=0).reshape(-1)
-            return np.expm1(pred_log.astype("float64"))
-
-        # TEST
-        pred_test_best = predict_dollars_with(model_best_dollars, test_inputs_tf)
-        best_test_m = metrics_full_and_clipped(true_test, pred_test_best, q_low=0.01, q_high=0.99)
-        display(metrics_to_df(best_test_m, "FT-Transformer (Test) [best val_rmse_dollars]"))
-
-        # TRAIN+VAL
-        pred_trainval_best = predict_dollars_with(model_best_dollars, trainval_inputs_tf)
-        best_trainval_m = metrics_full_and_clipped(true_trainval, pred_trainval_best, q_low=0.01, q_high=0.99)
-        display(metrics_to_df(best_trainval_m, "FT-Transformer (Train+Val) [best val_rmse_dollars]"))
-
+        print("ℹ️ best_by_val_rmse_dollars weights path exists, but no dedicated rebuild-artifact flow is implemented for it yet.")
     else:
         print("ℹ️ No best_by_val_rmse_dollars checkpoint found for this run.")
 
-# ---------------------------- DEBUG
-print("EVAL MODEL OBJECT ID:", id(model_eval))
-# ----------------------------
+if model_eval is not None:
+    print("EVAL MODEL OBJECT ID:", id(model_eval))
 ```
 
 ### Metrics Savepoint
