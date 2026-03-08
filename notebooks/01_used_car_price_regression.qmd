@@ -172,7 +172,7 @@ TRAIN_MODE = "full"   # "smoke" | "full" | "skip"
 
 RETRAIN_RIDGE = False
 RETRAIN_CATBOOST = False
-RETRAIN_KERAS = True
+RETRAIN_KERAS = False
 
 # ===============================
 # Paths section
@@ -1994,6 +1994,11 @@ FT_CFG = {
     "resid_dropout": 0.05,
     "ff_mult": 4,            # FFN hidden = ff_mult * d_token
 
+    # numeric tokenization
+    # 1 = current behavior
+    # later you can expand to 2, 4, 8, etc.
+    "num_tokens": 1,
+
     # embedding handling
     "embed_dropout": 0.0,    # was 0.05
     "head_dropout": 0.1,
@@ -2010,7 +2015,7 @@ FT_CFG = {
     "smoke_val_n": 5000,
 
     # ----------------------------
-    # Alternative config from tuning
+    # Alternative config from tuning (Round 2b)
         # larger-capacity variant
         # better MAE / clipped performance
         # worse full test RMSE
@@ -2019,12 +2024,19 @@ FT_CFG = {
     # "n_blocks": 4,
     # "resid_dropout": 0.0,
     # "head_dropout": 0.1,
+
+    # ----------------------------
+    # Alternative config from tuning (Round 3)
+        # better MAE / median AE / clipped performance
+        # worse full test RMSE
+    # ----------------------------
+    # "num_tokens": 4,
 }
 
 # ----------------------------
 # Tuning controls
 # ----------------------------
-TUNE = True                 # master switch
+TUNE = False                 # master switch
 TUNE_WHEN = "full"          # "smoke" | "full" | "both"
 TUNER_KIND = "bayes"        # "bayes" or "random"
 TUNER_MAX_TRIALS = 20       # start small; increase later
@@ -2320,9 +2332,24 @@ def build_ft_transformer_model(lr_schedule):
 
     x_num = num_norm_local(numeric_in)  # (N, D_num)
 
-    # Project numeric vector to a single token (N, 1, d_token)
-    num_token = layers.Dense(int(FT_CFG["d_token"]), name="num_token_proj")(x_num)
-    num_token = layers.Reshape((1, int(FT_CFG["d_token"])))(num_token)
+    d_token = int(FT_CFG["d_token"])
+    num_tokens = int(FT_CFG.get("num_tokens", 1))
+
+    # Numeric tokenization
+    # num_tokens = 1 -> current behavior
+    # num_tokens > 1 -> learned k-token projection
+    if num_tokens == 1:
+        num_token_block = layers.Dense(d_token, name="num_token_proj")(x_num)
+        num_token_block = layers.Reshape((1, d_token), name="num_token_reshape")(num_token_block)
+    else:
+        num_token_block = layers.Dense(
+            num_tokens * d_token,
+            name=f"num_token_proj_{num_tokens}x{d_token}"
+        )(x_num)
+        num_token_block = layers.Reshape(
+            (num_tokens, d_token),
+            name=f"num_token_reshape_{num_tokens}"
+        )(num_token_block)
 
     # Categorical tokens: one token per categorical feature
     cat_tokens = []
@@ -2338,22 +2365,22 @@ def build_ft_transformer_model(lr_schedule):
         ids = lk(cat_in[c])  # (N,)
         emb = layers.Embedding(
             input_dim=lk.vocabulary_size(),
-            output_dim=int(FT_CFG["d_token"]),
+            output_dim=d_token,
             name=f"{c}_emb_token",
         )(ids)  # (N, d_token)
 
         emb = layers.Dropout(float(FT_CFG["embed_dropout"]))(emb)
-        emb = layers.Reshape((1, int(FT_CFG["d_token"])))(emb)  # (N,1,d_token)
+        emb = layers.Reshape((1, d_token), name=f"{c}_emb_reshape")(emb)  # (N,1,d_token)
         cat_tokens.append(emb)
 
-    # Token sequence: [num_token] + cat_tokens => (N, T, d_token)
-    x = layers.Concatenate(axis=1, name="token_concat")([num_token] + cat_tokens)
+    # Token sequence: numeric tokens + categorical tokens => (N, T, d_token)
+    x = layers.Concatenate(axis=1, name="token_concat")([num_token_block] + cat_tokens)
 
     # Transformer blocks
     for i in range(int(FT_CFG["n_blocks"])):
         x = _transformer_block(
             x,
-            d_token=int(FT_CFG["d_token"]),
+            d_token=d_token,
             n_heads=int(FT_CFG["n_heads"]),
             attn_dropout=float(FT_CFG["attn_dropout"]),
             ff_dropout=float(FT_CFG["ff_dropout"]),
@@ -2365,10 +2392,11 @@ def build_ft_transformer_model(lr_schedule):
     x = layers.GlobalAveragePooling1D(name="token_mean_pool")(x)  # (N, d_token)
 
     # Head
-    x = layers.Dense(int(FT_CFG["d_token"]), activation=tf.keras.activations.gelu)(x)
+    x = layers.Dense(d_token, activation=tf.keras.activations.gelu)(x)
     x = layers.Dropout(float(FT_CFG.get("head_dropout", 0.10)))(x)
+
     # initialize predictions near the training median (log1p space)
-    y0 = float(np.median(y_train_nn)) 
+    y0 = float(np.median(y_train_nn))
 
     out = layers.Dense(
         1,
@@ -2386,7 +2414,7 @@ def build_ft_transformer_model(lr_schedule):
 
     model.compile(
         optimizer=opt,
-        loss=keras.losses.Huber(delta=float(FT_CFG["huber_delta"])), #loss=keras.losses.MeanAbsoluteError(), 
+        loss=keras.losses.Huber(delta=float(FT_CFG["huber_delta"])),
         metrics=[
             keras.metrics.RootMeanSquaredError(name="rmse_log"),
             RMSEDollars(Y_LOG_MIN, Y_LOG_MAX, name="rmse_dollars"),
@@ -2496,6 +2524,9 @@ def apply_hp_to_cfg(base_cfg: dict, hp: "kt.HyperParameters") -> dict:
     # cfg["n_blocks"]   = hp.Choice("n_blocks", [3, 4]) # -- picked 4, was 3
     # cfg["resid_dropout"] = hp.Choice("resid_dropout", [0.0, 0.05, 0.10]) # -- picked 0.0, was 0.05
     # cfg["head_dropout"]  = hp.Choice("head_dropout",  [0.0, 0.05, 0.10, 0.15]) # -- picked 0.1, was 0.1
+
+    # Round 3
+    # cfg["num_tokens"] = hp.Choice("num_tokens", [1, 4])
 
     return cfg
 
@@ -2647,12 +2678,14 @@ TUNED_KEYS_TO_APPLY = [
     # "resid_dropout",
     # "head_dropout",
     # "weight_decay",
+    # "num_tokens",
 ]
 
 INT_TUNED_KEYS = {
     # "batch_full",
     # "d_token",
     # "n_blocks",
+    # "num_tokens",
 }
 
 best_hp = None
@@ -2690,25 +2723,6 @@ def make_callbacks(train_mode: str):
             restore_best_weights=True,
         ),
     ]
-
-# def make_callbacks(train_mode: str, best_dollars_path: Path):
-#     ES_PAT = FT_CFG["es_patience_smoke"] if train_mode == "smoke" else FT_CFG["es_patience_full"]
-#     return [
-#         keras.callbacks.ModelCheckpoint(
-#             filepath=str(best_dollars_path),
-#             monitor="val_rmse_dollars",
-#             mode="min",
-#             save_best_only=True,
-#             save_weights_only=False,
-#             verbose=0,
-#         ),
-#         keras.callbacks.EarlyStopping(
-#             monitor="val_loss",
-#             mode="min",
-#             patience=int(ES_PAT),
-#             restore_best_weights=True,
-#         ),
-#     ]
 
 # 1) SKIP
 if TRAIN_MODE == "skip":
