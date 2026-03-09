@@ -169,7 +169,7 @@ os.environ["HDF5_USE_FILE_LOCKING"] = "FALSE"
 # ===============================
 # Training control flags
 # ===============================
-TRAIN_MODE = "smoke"   # "smoke" | "full" | "skip"
+TRAIN_MODE = "full"   # "smoke" | "full" | "skip"
 
 RETRAIN_RIDGE = False
 RETRAIN_CATBOOST = False
@@ -1966,46 +1966,44 @@ np.random.seed(SEED)
 
 ```{python}
 # ----------------------------
-# Step -1: Config
+# Config
 # ----------------------------
 FT_CFG = {
     # training
-    "batch_full": 512,       # was 2048
+    "batch_full": 512,       
     "epochs_full": 120,
     "batch_smoke": 512,
     "epochs_smoke": 5,
 
     # early stopping
-    "es_patience_full": 20,  # was 10
+    "es_patience_full": 20,  
     "es_patience_smoke": 3,
 
     # optimization
-    "lr": 4e-4,              # was 2e-4, then was was 3e-4, base LR (peak after warmup)
+    "lr": 4e-4,              # base LR (peak after warmup)
     "min_lr": 1e-6,          # floor for cosine tail
-    "weight_decay": 1e-4,    # was 0.0
+    "weight_decay": 1e-4,    
     "clipnorm": 1.0,
-    "huber_delta": 2.0,
+    "huber_delta": 1.0,
 
     # transformer
     "d_token": 96,
     "n_blocks": 3,
     "n_heads": 8,
-    "attn_dropout": 0.10,    # stays 0.10
-    "ff_dropout": 0.10,      # was 0.15
+    "attn_dropout": 0.10,    
+    "ff_dropout": 0.10,      
     "resid_dropout": 0.05,
     "ff_mult": 4,            # FFN hidden = ff_mult * d_token
 
     # numeric tokenization
-    # 1 = current behavior
-    # later you can expand to 2, 4, 8, etc.
     "num_tokens": 1,
 
     # embedding handling
-    "embed_dropout": 0.0,    # was 0.05
+    "embed_dropout": 0.0,    
     "head_dropout": 0.1,
 
     # warmup
-    "warmup_frac": 0.05,     # was 0.10, 10% of total steps
+    "warmup_frac": 0.05,     
 
     # prediction
     "pred_batch": 4096,
@@ -2014,24 +2012,6 @@ FT_CFG = {
     "smoke_subsample": True,
     "smoke_train_n": 15000,
     "smoke_val_n": 5000,
-
-    # ----------------------------
-    # Alternative config from tuning (Round 2b)
-        # larger-capacity variant
-        # better MAE / clipped performance
-        # worse full test RMSE
-    # ----------------------------
-    # "d_token": 128,
-    # "n_blocks": 4,
-    # "resid_dropout": 0.0,
-    # "head_dropout": 0.1,
-
-    # ----------------------------
-    # Alternative config from tuning (Round 3)
-        # better MAE / median AE / clipped performance
-        # worse full test RMSE
-    # ----------------------------
-    # "num_tokens": 4,
 }
 
 # ----------------------------
@@ -2040,18 +2020,17 @@ FT_CFG = {
 TUNE = True                 # master switch
 TUNE_WHEN = "full"          # "smoke" | "full" | "both"
 TUNER_KIND = "bayes"        # "bayes" or "random"
-ACTIVE_TUNING_ROUND = "round_3"   # or "round_1", "round_2a", "round_2b", or "round_3"
-TUNER_MAX_TRIALS = 20       # start small; increase later
+ACTIVE_TUNING_ROUND = "round_4"   # or "round_1", "round_2a", "round_2b", "round_3", "round_4"
+TUNER_MAX_TRIALS = 8      # start small; increase later (did 20 for full run)
 TUNER_EXECUTIONS_PER_TRIAL = 1
 
 # how long each tuning trial trains (keep short; Step 6 is the real training)
 TUNER_EPOCHS_SMOKE = 6
-TUNER_EPOCHS_FULL  = 25
+TUNER_EPOCHS_FULL  = 15      # was 25 for full run
 
 # early stopping inside trials (short + stable)
 TUNER_PATIENCE_SMOKE = 2
-TUNER_PATIENCE_FULL  = 6
-
+TUNER_PATIENCE_FULL  = 4     # was 6 for full run
 # what to optimize during tuning
 TUNER_OBJECTIVE = "val_loss"  # keep aligned with restore_best_weights on val_loss
 # alternative: "val_rmse_dollars"
@@ -2112,17 +2091,6 @@ def _keras_latest_exists() -> bool:
 def _touches_latest() -> bool:
     return TRAIN_MODE == "full"
 
-SHOULD_TRAIN_KERAS = (
-    (TRAIN_MODE == "smoke") or
-    (TRAIN_MODE == "full" and (RETRAIN_KERAS or (not _keras_latest_exists())))
-)
-
-print("FT-Transformer SHOULD_TRAIN_KERAS =", SHOULD_TRAIN_KERAS, "| latest exists =", _keras_latest_exists())
-
-KERAS_EVAL_ARTIFACT_DIR = None
-KERAS_EVAL_ARTIFACT_KIND = None   # "latest" | "run"
-KERAS_MODEL_SOURCE = None         # "latest_loaded" | "trained_this_run" | None
-
 # ----------------------------
 # Step 2: Prepare train/val/test (NN copies) + imputations
 # ----------------------------
@@ -2171,8 +2139,12 @@ print("NN numeric cols:", len(num_cols_nn), "| NN cat cols:", len(cat_cols_nn))
 # ----------------------------
 # Step 3: Prepare categorical vocabularies
 # ----------------------------
+SHOULD_TRAIN_KERAS = (
+    (TRAIN_MODE == "smoke") or
+    (TRAIN_MODE == "full" and (RETRAIN_KERAS or (not _keras_latest_exists())))
+)
+
 LOOKUP_VOCABS = {}
-VOCAB_SIZES = {}
 
 if SHOULD_TRAIN_KERAS:
     for c in cat_cols_nn:
@@ -2188,7 +2160,6 @@ if SHOULD_TRAIN_KERAS:
         vocab = [str(v) for v in vocab]
 
         LOOKUP_VOCABS[c] = vocab
-        VOCAB_SIZES[c] = int(len(vocab) + 1)
 else:
     print("⏭️ Skipping adapt — will load existing latest weights/artifacts.")
 ```
@@ -2209,6 +2180,47 @@ def to_input_dict_tf(inputs_np: dict) -> dict:
     for c in cat_cols_nn:
         out[c] = tf.convert_to_tensor(inputs_np[c].astype(str), dtype=tf.string)
     return out
+
+def assert_nonempty_inputs(inputs: dict, y: np.ndarray, name: str):
+    if len(y) == 0:
+        raise ValueError(f"{name}: y is empty")
+    if "numeric" not in inputs:
+        raise ValueError(f"{name}: missing numeric input")
+    if int(inputs["numeric"].shape[0]) == 0:
+        raise ValueError(f"{name}: numeric input has zero rows")
+
+    n_rows = int(inputs["numeric"].shape[0])
+    for k, v in inputs.items():
+        if int(v.shape[0]) != n_rows:
+            raise ValueError(
+                f"{name}: input '{k}' row count {int(v.shape[0])} does not match numeric row count {n_rows}"
+            )
+
+    if len(y) != n_rows:
+        raise ValueError(f"{name}: y row count {len(y)} does not match input row count {n_rows}")
+
+def make_tf_dataset(
+    inputs: dict,
+    y: np.ndarray,
+    *,
+    batch_size: int,
+    training: bool,
+    drop_remainder: bool = True,
+) -> tf.data.Dataset:
+    assert_nonempty_inputs(inputs, y, "dataset_build")
+
+    ds = tf.data.Dataset.from_tensor_slices((inputs, y))
+
+    if training:
+        ds = ds.shuffle(
+            buffer_size=min(len(y), 10000),
+            seed=SEED,
+            reshuffle_each_iteration=True,
+        )
+
+    ds = ds.batch(int(batch_size), drop_remainder=drop_remainder)
+    ds = ds.prefetch(tf.data.AUTOTUNE)
+    return ds
 
 train_inputs_tf = to_input_dict_tf(to_input_dict_np(X_train_nn))
 val_inputs_tf   = to_input_dict_tf(to_input_dict_np(X_val_nn))
@@ -2471,7 +2483,7 @@ def build_ft_transformer_model(lr_schedule):
     return model
 ```
 
-#### Keras Model Tuning
+#### Keras Model Optional Tuning
 ```{python}
 # ==========================================================
 # Step 5.5: Optional KerasTuner
@@ -2540,6 +2552,10 @@ def build_model_with_cfg(cfg: dict, *, n_train_rows: int, epochs: int, batch_siz
 
 # ----------------------------------------------------------
 # Tuning search space
+# Note -- full tuning applies best HP to FT_CFG only for the current run.
+# To make selected values the new default baseline for future runs,
+# update the original FT_CFG dictionary manually.
+# Smoke tuning is sanity-only and does not overwrite FT_CFG.
 # ----------------------------------------------------------
 TUNING_SEARCH_SPACE = {
     "round_1": {
@@ -2603,7 +2619,8 @@ TUNING_SEARCH_SPACE = {
     },
 
     "round_2b": {
-        "notes": "Did not select due to higher performance cost and no meaningful improvement.",
+        "notes_1": "Did not select due to higher performance cost and no meaningful improvement.",
+        "notes_2": "larger-capacity variant, better MAE / clipped performance, worse full test RMSE",
         "d_token": {
             "choices": [96, 128],
             "dtype": "int",
@@ -2631,11 +2648,36 @@ TUNING_SEARCH_SPACE = {
     },
 
     "round_3": {
+        "notes_1": "Did not select due to higher performance cost and no meaningful improvement.",
+        "notes_2": "better MAE / median AE / clipped performance, worse full test RMSE", 
         "num_tokens": {
             "choices": [1, 4],
             "dtype": "int",
-            "notes": "experiment to increase numeric token capacity",
+            "selected": 4,
+            "notes": "was 1, selected 4 -- kept at 1",
         }
+    },
+
+    "round_4": {
+        "notes": "This was the new best round",
+        "weight_decay": {
+            "choices": [3e-5, 1e-4, 3e-4],
+            "dtype": "float",
+            "selected": 1e-4,
+            "notes": "tuning kept value at 1e-4",
+        },
+        "ff_dropout": {
+            "choices": [0.05, 0.10, 0.15],
+            "dtype": "float",
+            "selected": 0.1,
+            "notes": "tuning kept value at 0.1",
+        },
+        "huber_delta": {
+            "choices": [1.0, 2.0, 3.0],
+            "dtype": "float",
+            "selected": 1.0,
+            "notes": "was 2.0, tuner selected 1.0 -- now baked in",
+        },
     }
 }
 
@@ -2792,6 +2834,8 @@ class FTHyperModel(kt.HyperModel):
         self.epochs = int(epochs)
 
     def build(self, hp):
+        tf.keras.backend.clear_session()
+
         cfg = apply_hp_to_cfg(self.base_cfg, hp)
 
         # batch affects steps/epoch -> total_steps -> lr schedule
@@ -2811,6 +2855,26 @@ class FTHyperModel(kt.HyperModel):
         batch_size = int(cfg["batch_smoke"] if self.mode == "smoke" else cfg["batch_full"])
         batch_eff = min(batch_size, int(len(y)))
 
+        val_x, val_y = validation_data
+
+        assert_nonempty_inputs(x, y, "tuner_train")
+        assert_nonempty_inputs(val_x, val_y, "tuner_val")
+
+        train_ds = make_tf_dataset(
+            x,
+            y,
+            batch_size=batch_eff,
+            training=True,
+            drop_remainder=True,
+        )
+        val_ds = make_tf_dataset(
+            val_x,
+            val_y,
+            batch_size=batch_eff,
+            training=False,
+            drop_remainder=True,
+        )
+
         patience = int(TUNER_PATIENCE_SMOKE if self.mode == "smoke" else TUNER_PATIENCE_FULL)
         cb = keras.callbacks.EarlyStopping(
             monitor=TUNER_OBJECTIVE,
@@ -2820,10 +2884,9 @@ class FTHyperModel(kt.HyperModel):
         )
 
         return model.fit(
-            x, y,
-            validation_data=validation_data,
+            train_ds,
+            validation_data=val_ds,
             epochs=self.epochs,
-            batch_size=batch_eff,
             callbacks=[cb],
             verbose=0,
         )
@@ -2895,21 +2958,24 @@ def run_tuner_for_mode(mode: str):
 
     best_hp = tuner.get_best_hyperparameters(1)[0]
 
-    # Save best hp for reproducibility
-    run_info = {
+    # Save for reproducability 
+    active_round_dict = get_active_tuning_round_dict()
+
+    best_hp_info = {
         "mode": mode,
         "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "active_round": ACTIVE_TUNING_ROUND,
         "tuner_kind": TUNER_KIND,
         "objective": TUNER_OBJECTIVE,
         "max_trials": int(TUNER_MAX_TRIALS),
         "executions_per_trial": int(TUNER_EXECUTIONS_PER_TRIAL),
         "epochs_per_trial": int(trial_epochs),
         "patience": int(TUNER_PATIENCE_SMOKE if mode == "smoke" else TUNER_PATIENCE_FULL),
-        "search_space": TUNING_SEARCH_SPACE,
+        "search_space": active_round_dict,
         "best_hp": dict(best_hp.values),
     }
 
-    atomic_write_json(Path(tuner_dir) / f"best_hp_{mode}_{tuner_project}.json", run_info)
+    atomic_write_json(Path(tuner_dir) / f"best_hp_{mode}_{tuner_project}.json", best_hp_info)
 
     print("✅ Tuning DONE | best_hp:", best_hp.values)
     return best_hp
@@ -2951,13 +3017,6 @@ KERAS_EVAL_ARTIFACT_DIR = None         # points to KERAS_DIR for latest, or run 
 KERAS_EVAL_ARTIFACT_KIND = None        # "latest" | "run"
 KERAS_MODEL_SOURCE = None              # "latest_loaded" | "trained_this_run" | None
 
-# Weights-based latest artifact paths
-KERAS_LATEST_WEIGHTS_PATH = KERAS_DIR / "keras_model.weights.h5"
-KERAS_LATEST_RUN_INFO_PATH = KERAS_DIR / "keras_run_info.json"
-KERAS_LATEST_TRAIN_MEDIANS_PATH = KERAS_DIR / "keras_train_medians.json"
-KERAS_LATEST_NUM_NORM_WEIGHTS_PATH = KERAS_DIR / "keras_num_norm_weights.json"
-KERAS_LATEST_LOOKUP_VOCABS_PATH = KERAS_DIR / "keras_lookup_vocabs.json"
-
 def make_callbacks(train_mode: str):
     ES_PAT = FT_CFG["es_patience_smoke"] if train_mode == "smoke" else FT_CFG["es_patience_full"]
     return [
@@ -2968,15 +3027,6 @@ def make_callbacks(train_mode: str):
             restore_best_weights=True,
         ),
     ]
-
-def _keras_latest_exists_weights() -> bool:
-    return (
-        KERAS_LATEST_WEIGHTS_PATH.exists()
-        and KERAS_LATEST_RUN_INFO_PATH.exists()
-        and KERAS_LATEST_TRAIN_MEDIANS_PATH.exists()
-        and KERAS_LATEST_NUM_NORM_STATS_PATH.exists()
-        and KERAS_LATEST_LOOKUP_VOCABS_PATH.exists()
-    )
 
 def _keras_artifact_paths(base_dir: Path, kind: str) -> dict:
     if kind == "latest":
@@ -3150,12 +3200,6 @@ def _rebuild_and_load_keras_model_from_artifacts(*, base_dir: Path, kind: str):
         model_loaded = build_ft_transformer_model(lr_schedule)
         model_loaded.load_weights(art["paths"]["weights"])
 
-        # optional debug
-        w = model_loaded.get_weights()
-        print("DEBUG weight tensors:", len(w))
-        print("DEBUG first weight mean/std:", float(np.mean(w[0])), float(np.std(w[0])))
-        print("DEBUG last weight mean/std:", float(np.mean(w[-1])), float(np.std(w[-1])))
-
     finally:
         FT_CFG = _FT_CFG_backup
         num_cols_nn = _num_cols_backup
@@ -3164,14 +3208,11 @@ def _rebuild_and_load_keras_model_from_artifacts(*, base_dir: Path, kind: str):
 
     return model_loaded, art
 
-SHOULD_TRAIN_KERAS = (
-    (TRAIN_MODE == "smoke") or
-    (TRAIN_MODE == "full" and (RETRAIN_KERAS or (not _keras_latest_exists_weights())))
-)
+print("FT-Transformer SHOULD_TRAIN_KERAS =", SHOULD_TRAIN_KERAS, "| latest exists =", _keras_latest_exists())
 
 # 1) SKIP
 if TRAIN_MODE == "skip":
-    if _keras_latest_exists_weights():
+    if _keras_latest_exists():
         print("✅ TRAIN_MODE='skip' — loading latest Keras weights:\n ", KERAS_LATEST_WEIGHTS_PATH)
         model, latest_art = _rebuild_and_load_keras_model_from_artifacts(
             base_dir=KERAS_DIR,
@@ -3187,7 +3228,7 @@ if TRAIN_MODE == "skip":
         model = None
 
 # 2) FULL + no retrain
-elif (TRAIN_MODE == "full") and _keras_latest_exists_weights() and (not RETRAIN_KERAS):
+elif (TRAIN_MODE == "full") and _keras_latest_exists() and (not RETRAIN_KERAS):
     print("✅ Loading existing Keras latest weights (RETRAIN_KERAS=False, TRAIN_MODE='full'):\n ", KERAS_LATEST_WEIGHTS_PATH)
     model, latest_art = _rebuild_and_load_keras_model_from_artifacts(
         base_dir=KERAS_DIR,
@@ -3217,7 +3258,6 @@ else:
     KERAS_RUN_DIR.mkdir(parents=True, exist_ok=True)
 
     versioned_weights_path = KERAS_RUN_DIR / "keras_model.weights.h5"
-    best_dollars_path = KERAS_RUN_DIR / "best_by_val_rmse_dollars.weights.h5"  # optional, not currently written
 
     # Run info
     trial_epochs_for_run = (
@@ -3278,256 +3318,42 @@ else:
 
     model = build_ft_transformer_model(lr_schedule)
 
-    print(
-        f"🚆 Training FT-Transformer | mode={TRAIN_MODE} | epochs={EPOCHS} | batch={batch_eff} "
-        f"| steps/epoch={steps_per_epoch} | warmup_steps={warmup_steps} | total_steps={total_steps}"
+    print(f"Training FT-Transformer | mode={TRAIN_MODE} | epochs={EPOCHS} | batch={batch_eff}")
+
+    assert_nonempty_inputs(train_inputs_run, y_train_run, "step6_train")
+    assert_nonempty_inputs(val_inputs_run, y_val_run, "step6_val")
+
+    train_ds = make_tf_dataset(
+        train_inputs_run,
+        y_train_run,
+        batch_size=batch_eff,
+        training=True,
+        drop_remainder=True,
     )
-
-    print("Initial prediction check:")
-    tmp_pred = model.predict(train_inputs_run, batch_size=1024)[:5]
-    print(tmp_pred)
-
-    tmp = model.predict(train_inputs_run, batch_size=2048, verbose=0).reshape(-1)
-    print("pred_log1p: min/median/max =", float(tmp.min()), float(np.median(tmp)), float(tmp.max()))
-    print("% at 0 floor =", float(np.mean(tmp <= 1e-12)) * 100, "%")
-    print("y_train_nn: min/median/max =", float(y_train_run.min()), float(np.median(y_train_run)), float(y_train_run.max()))
+    val_ds = make_tf_dataset(
+        val_inputs_run,
+        y_val_run,
+        batch_size=batch_eff,
+        training=False,
+        drop_remainder=True,
+    )
 
     history = model.fit(
-        train_inputs_run, y_train_run,
-        validation_data=(val_inputs_run, y_val_run),
+        train_ds,
+        validation_data=val_ds,
         epochs=int(EPOCHS),
-        batch_size=batch_eff,
         verbose=0,
-        callbacks=make_callbacks(TRAIN_MODE), #best_dollars_path
+        callbacks=make_callbacks(TRAIN_MODE),
     )
-
-    # ---------------------------- DEBUG
-    print("----------------------------")
-    print("DEBUG SECTION")
-    print("----------------------------")
-
-    print("FIT epochs requested:", int(EPOCHS))
-    print("FIT epochs completed:", len(history.history.get("loss", [])))
-    print("Callbacks:", [type(cb).__name__ for cb in make_callbacks(TRAIN_MODE)]) #best_dollars_path
-    print("Last val_rmse_dollars:", history.history.get("val_rmse_dollars", [None])[-1])
-
-    pred_log = model.predict(val_inputs_run, batch_size=int(FT_CFG["pred_batch"]), verbose=0).reshape(-1)
-
-    val_true_dollars = np.expm1(y_val_run.astype("float64"))
-    val_pred_dollars = np.expm1(pred_log.astype("float64"))
-
-    print("VAL pred_log1p min/med/max:",
-        float(pred_log.min()), float(np.median(pred_log)), float(pred_log.max()))
-    print("VAL pred$ min/med/max:",
-        float(val_pred_dollars.min()), float(np.median(val_pred_dollars)), float(val_pred_dollars.max()))
-
-    print("After fit: quick val RMSE($) via predict =",
-        float(np.sqrt(np.mean((val_true_dollars - val_pred_dollars) ** 2))))
-
-    vals = history.history.get("val_rmse_dollars", [])
-    print("val_rmse_dollars:", [round(v, 1) for v in vals[:10]], "...")
-    best_ep = int(np.argmin(vals)) if len(vals) else None
-    print("BEST val_rmse_dollars epoch =", best_ep, "value =", vals[best_ep] if best_ep is not None else None)
-
-    print("MODEL OBJECT ID:", id(model))
-    print("HISTORY LEN:", len(history.history["loss"]))
-    print("RUN DIR:", KERAS_RUN_DIR)
-    print("LATEST WEIGHTS EXIST:", KERAS_LATEST_WEIGHTS_PATH.exists())
-
-    print("After fit: last val_rmse_dollars =", history.history["val_rmse_dollars"][-1])
-    print("----------------------------")
-    print("END DEBUG SECTION")
-    print("----------------------------")
-    # ----------------------------
 
     # Save versioned weights only
     model.save_weights(versioned_weights_path)
     print("💾 Saved versioned weights:", versioned_weights_path)
 
-    # Canonical evaluation now points to the run artifact directory, not a .keras model file.
+    # Evaluation should use this run's saved weight/artifact bundle.
     KERAS_EVAL_ARTIFACT_DIR = KERAS_RUN_DIR
     KERAS_EVAL_ARTIFACT_KIND = "run"
     KERAS_MODEL_SOURCE = "trained_this_run"
-
-    # ----------------------------
-    # DIRECT POST-FIT TEST CHECK
-    # ----------------------------
-    true_test_direct = np.expm1(y_test_nn.astype("float64"))
-
-    pred_test_direct = np.expm1(
-        model.predict(
-            test_inputs_tf,
-            batch_size=int(FT_CFG["pred_batch"]),
-            verbose=0
-        ).reshape(-1).astype("float64")
-    )
-
-    direct_test_m = metrics_full_and_clipped(true_test_direct, pred_test_direct, q_low=0.01, q_high=0.99)
-    display(metrics_to_df(direct_test_m, "FT-Transformer (Test) [direct in-memory]"))
-
-    # Immediate rebuild + weights reload check
-    model_reloaded_check, art_check = _rebuild_and_load_keras_model_from_artifacts(
-        base_dir=KERAS_RUN_DIR,
-        kind="run",
-    )
-
-    # build the inputs for the reloaded model
-    test_inputs_tf_check = _prepare_inputs_for_saved_artifacts(
-        X_test,
-        num_cols_saved=art_check["num_cols"],
-        cat_cols_saved=art_check["cat_cols"],
-        train_medians_saved=art_check["train_medians"],
-        num_norm_mean_saved=art_check["num_norm_mean"],
-        num_norm_std_saved=art_check["num_norm_std"],
-    )
-
-    # ----------------------------
-    # DEBUG INTERMEDIATE LAYER CHECK
-    # ----------------------------
-    print("----------------------------")
-    print("DEBUG INTERMEDIATE LAYER CHECK")
-    print("----------------------------")
-
-    same_inputs_small = {k: v[:32] for k, v in test_inputs_tf.items()}
-
-    def compare_layer(layer_name: str):
-        probe1 = keras.Model(model.inputs, model.get_layer(layer_name).output)
-        probe2 = keras.Model(model_reloaded_check.inputs, model_reloaded_check.get_layer(layer_name).output)
-
-        out1 = probe1.predict(same_inputs_small, verbose=0)
-        out2 = probe2.predict(same_inputs_small, verbose=0)
-
-        print(
-            layer_name,
-            "| shape:", out1.shape,
-            "| allclose:", np.allclose(out1, out2),
-            "| max abs diff:", float(np.max(np.abs(out1 - out2)))
-        )
-
-    # numeric preprocessing
-    # compare_layer("num_norm")
-
-    # one categorical embedding path
-    compare_layer("manufacturer_emb_token")
-    compare_layer("manufacturer_emb_reshape")
-
-    # token assembly / transformer / head
-    compare_layer("token_concat")
-    compare_layer("final_ln")
-    compare_layer("token_mean_pool")
-    compare_layer("head_dense")
-    compare_layer("pred_log1p")
-
-    print("----------------------------")
-    print("DEBUG INTERMEDIATE LAYER CHECK ENDS")
-    print("----------------------------")
-    # ----------------------------
-    # DEBUG INPUT TENSOR CHECK
-    # ----------------------------
-    print("----------------------------")
-    print("DEBUG INPUT TENSOR CHECK")
-    print("----------------------------")
-
-    x_num_1 = test_inputs_tf["numeric"].numpy()
-    x_num_2 = test_inputs_tf_check["numeric"].numpy()
-
-    print("numeric shape equal:", x_num_1.shape == x_num_2.shape)
-    print("numeric allclose:", np.allclose(x_num_1, x_num_2))
-    print("numeric max abs diff:", float(np.max(np.abs(x_num_1 - x_num_2))))
-
-    print("numeric first row original:", x_num_1[0, :10])
-    print("numeric first row reload:  ", x_num_2[0, :10])
-
-    for c in cat_cols_nn:
-        a = test_inputs_tf[c].numpy()
-        b = test_inputs_tf_check[c].numpy()
-        print(c, "tensor equal:", np.array_equal(a, b))
-
-    # also test predictions using identical tensors
-    same_inputs = test_inputs_tf
-
-    pred_same_inmem = np.expm1(
-        model.predict(
-            same_inputs,
-            batch_size=int(FT_CFG["pred_batch"]),
-            verbose=0
-        ).reshape(-1).astype("float64")
-    )
-
-    pred_same_reload = np.expm1(
-        model_reloaded_check.predict(
-            same_inputs,
-            batch_size=int(FT_CFG["pred_batch"]),
-            verbose=0
-        ).reshape(-1).astype("float64")
-    )
-
-    print("same-input predictions allclose:", np.allclose(pred_same_inmem, pred_same_reload))
-    print("same-input prediction max abs diff:", float(np.max(np.abs(pred_same_inmem - pred_same_reload))))
-
-    print("----------------------------")
-    print("DEBUG INPUT TENSOR CHECK ENDS")
-    print("----------------------------")
-    # ----------------------------
-
-    print("----------------------------")
-    print("DEBUG LOOKUP VOCAB CHECK")
-    print("----------------------------")
-    for c in cat_cols_nn:
-        v1 = model.get_layer(f"{c}_lookup").get_vocabulary()[:10]
-        v2 = model_reloaded_check.get_layer(f"{c}_lookup").get_vocabulary()[:10]
-        print(c, v1 == v2, v1[:5], v2[:5])
-    print("----------------------------")
-    print("DEBUG LOOKUP VOCAB CHECK ENDS")
-    print("----------------------------")
-
-    print("----------------------------")
-    print("DEBUG LOOKUP ID CHECK")
-    print("----------------------------")
-    sample_inputs = {k: v[:8] for k, v in test_inputs_tf.items()}
-
-    for c in cat_cols_nn:
-        probe1 = keras.Model(model.inputs, model.get_layer(f"{c}_lookup").output)
-        probe2 = keras.Model(model_reloaded_check.inputs, model_reloaded_check.get_layer(f"{c}_lookup").output)
-
-        ids1 = probe1.predict(sample_inputs, verbose=0).reshape(-1)
-        ids2 = probe2.predict(sample_inputs, verbose=0).reshape(-1)
-
-        print(c, "ids equal:", np.array_equal(ids1, ids2), "ids1:", ids1[:8], "ids2:", ids2[:8])
-
-    print("----------------------------")
-    print("DEBUG LOOKUP ID CHECK ENDS")
-    print("----------------------------")
-
-    pred_test_reloaded = np.expm1(
-        model_reloaded_check.predict(
-            test_inputs_tf,
-            batch_size=int(FT_CFG["pred_batch"]),
-            verbose=0
-        ).reshape(-1).astype("float64")
-    )
-
-    reloaded_test_m = metrics_full_and_clipped(true_test_direct, pred_test_reloaded, q_low=0.01, q_high=0.99)
-    display(metrics_to_df(reloaded_test_m, "FT-Transformer (Test) [immediate reload]"))
-
-    print("Reload allclose:", np.allclose(pred_test_direct, pred_test_reloaded))
-    print("Reload max abs diff:", np.max(np.abs(pred_test_direct - pred_test_reloaded)))
-
-    print("----------------------------")
-    print("DEBUG SECTION")
-    print("----------------------------")
-
-    # DEBUG: compare weights between trained model and reloaded model
-    w1 = model.get_weights()
-    w2 = model_reloaded_check.get_weights()
-
-    diff = np.max([np.max(np.abs(a - b)) for a, b in zip(w1, w2)])
-    print("DEBUG weight max abs diff:", diff)
-
-    print("----------------------------")
-    print("DEBUG SECTION ENDS")
-    print("----------------------------")
-    # ----------------------------
 
     # Update latest ONLY for FULL, and copy the rebuild artifacts alongside latest weights.
     if _touches_latest():
@@ -3577,7 +3403,7 @@ else:
             y_trainval_eval = np.concatenate([y_train_nn, y_val_nn], axis=0)
             trainval_inputs_tf_eval = to_input_dict_tf(to_input_dict_np(X_trainval_eval_df))
 
-            pred_batch_eval = int(FT_CFG["pred_batch"])
+            pred_batch_eval = int(eval_art["ft_cfg"]["pred_batch"])
 
         else:
             # For loaded historical/latest artifacts, rebuild inputs from saved artifacts.
@@ -3919,14 +3745,6 @@ else:
         print("ℹ️ No training history available (likely loaded model or training skipped).")
 
     print("✅ Done: FT-Transformer trained/loaded and evaluated.")
-
-    if "best_dollars_path" in globals() and Path(best_dollars_path).exists():
-        print("ℹ️ best_by_val_rmse_dollars weights path exists, but no dedicated rebuild-artifact flow is implemented for it yet.")
-    else:
-        print("ℹ️ No best_by_val_rmse_dollars checkpoint found for this run.")
-
-if model_eval is not None:
-    print("EVAL MODEL OBJECT ID:", id(model_eval))
 ```
 
 ### Metrics Savepoint
