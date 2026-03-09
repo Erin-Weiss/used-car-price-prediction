@@ -169,11 +169,11 @@ os.environ["HDF5_USE_FILE_LOCKING"] = "FALSE"
 # ===============================
 # Training control flags
 # ===============================
-TRAIN_MODE = "full"   # "smoke" | "full" | "skip"
+TRAIN_MODE = "smoke"   # "smoke" | "full" | "skip"
 
 RETRAIN_RIDGE = False
 RETRAIN_CATBOOST = False
-RETRAIN_KERAS = False
+RETRAIN_KERAS = True
 
 # ===============================
 # Paths section
@@ -2037,9 +2037,10 @@ FT_CFG = {
 # ----------------------------
 # Tuning controls
 # ----------------------------
-TUNE = False                 # master switch
+TUNE = True                 # master switch
 TUNE_WHEN = "full"          # "smoke" | "full" | "both"
 TUNER_KIND = "bayes"        # "bayes" or "random"
+ACTIVE_TUNING_ROUND = "round_3"   # or "round_1", "round_2a", "round_2b", or "round_3"
 TUNER_MAX_TRIALS = 20       # start small; increase later
 TUNER_EXECUTIONS_PER_TRIAL = 1
 
@@ -2089,6 +2090,8 @@ KERAS_DIR.mkdir(parents=True, exist_ok=True)
 
 KERAS_RUNS_DIR = KERAS_DIR / "runs"
 KERAS_RUNS_DIR.mkdir(parents=True, exist_ok=True)
+
+KERAS_TUNING_HISTORY_PATH = KERAS_DIR / "tuning_history.json"
 
 # Weights-based latest artifacts
 KERAS_LATEST_WEIGHTS_PATH = KERAS_DIR / "keras_model.weights.h5"
@@ -2535,6 +2538,142 @@ def build_model_with_cfg(cfg: dict, *, n_train_rows: int, epochs: int, batch_siz
 
     return model
 
+# ----------------------------------------------------------
+# Tuning search space
+# ----------------------------------------------------------
+TUNING_SEARCH_SPACE = {
+    "round_1": {
+        "lr": {
+            "choices": [1e-4, 2e-4, 3e-4],
+            "dtype": "float",
+            "selected": 3e-4,
+            "notes": "was 2e-4, tuner selected 3e-4",
+        },
+        "warmup_frac": {
+            "choices": [0.05, 0.10, 0.15],
+            "dtype": "float",
+            "selected": 0.05,
+            "notes": "was 0.10, tuner selected 0.05",
+        },
+        "weight_decay": {
+            "choices": [0.0, 1e-4, 3e-4],
+            "dtype": "float",
+            "selected": 0.0,
+            "notes": "was 0.0 and tuning kept it at 0.0",
+        },
+        "ff_dropout": {
+            "choices": [0.10, 0.15, 0.20],
+            "dtype": "float",
+            "selected": 0.10,
+            "notes": "was 0.15, tuner selected 0.10",
+        },
+        "attn_dropout": {
+            "choices": [0.05, 0.10, 0.15],
+            "dtype": "float",
+            "selected": 0.10,
+            "notes": "tuning kept value at 0.10",
+        },
+        "embed_dropout": {
+            "choices": [0.00, 0.05, 0.10],
+            "dtype": "float",
+            "selected": 0.00,
+            "notes": "was 0.05, tuner selected 0.00",
+        },
+    },
+
+    "round_2a": {
+        "batch_full": {
+            "choices": [512, 1024, 2048, 4096],
+            "dtype": "int",
+            "selected": 512,
+            "notes": "was 2048, tuner selected 512",
+        },
+        "lr": {
+            "choices": [1e-4, 2e-4, 3e-4, 4e-4],
+            "dtype": "float",
+            "selected": 4e-4,
+            "notes": "was 3e-4, tuner selected 4e-4",
+        },
+        "weight_decay": {
+            "choices": [0.0, 1e-5, 3e-5, 1e-4],
+            "dtype": "float",
+            "selected": 1e-4,
+            "notes": "was 0.0, tuner selected 1e-4",
+        },
+    },
+
+    "round_2b": {
+        "notes": "Did not select due to higher performance cost and no meaningful improvement.",
+        "d_token": {
+            "choices": [96, 128],
+            "dtype": "int",
+            "selected": 128,
+            "notes": "baseline was 96",
+        },
+        "n_blocks": {
+            "choices": [3, 4],
+            "dtype": "int",
+            "selected": 4,
+            "notes": "baseline was 3",
+        },
+        "resid_dropout": {
+            "choices": [0.0, 0.05, 0.10],
+            "dtype": "float",
+            "selected": 0.0,
+            "notes": "baseline was 0.05",
+        },
+        "head_dropout": {
+            "choices": [0.0, 0.05, 0.10, 0.15],
+            "dtype": "float",
+            "selected": 0.10,
+            "notes": "baseline already 0.10",
+        },
+    },
+
+    "round_3": {
+        "num_tokens": {
+            "choices": [1, 4],
+            "dtype": "int",
+            "notes": "experiment to increase numeric token capacity",
+        }
+    }
+}
+
+def get_active_tuning_round_dict() -> dict:
+    if not TUNE:
+        return {}
+
+    if ACTIVE_TUNING_ROUND not in TUNING_SEARCH_SPACE:
+        raise ValueError(
+            f"ACTIVE_TUNING_ROUND='{ACTIVE_TUNING_ROUND}' not found in TUNING_SEARCH_SPACE. "
+            f"Available rounds: {list(TUNING_SEARCH_SPACE.keys())}"
+        )
+
+    round_dict = TUNING_SEARCH_SPACE[ACTIVE_TUNING_ROUND]
+
+    return {
+        k: v for k, v in round_dict.items()
+        if isinstance(v, dict) and "choices" in v
+    }
+
+def apply_best_hp_to_ft_cfg(ft_cfg: dict, best_hp) -> dict:
+    active_round = get_active_tuning_round_dict()
+    applied_updates = {}
+
+    for k, param_info in active_round.items():
+        if k in best_hp.values:
+            val = best_hp.get(k)
+            dtype = param_info.get("dtype", None)
+
+            if dtype == "int":
+                val = int(val)
+            elif dtype == "float":
+                val = float(val)
+
+            ft_cfg[k] = val
+            applied_updates[k] = val
+
+    return applied_updates
 
 # ----------------------------------------------------------
 # 3) Tuner hyperparameter space 
@@ -2544,30 +2683,103 @@ def build_model_with_cfg(cfg: dict, *, n_train_rows: int, epochs: int, batch_siz
 def apply_hp_to_cfg(base_cfg: dict, hp: "kt.HyperParameters") -> dict:
     cfg = dict(base_cfg)
 
-    # Already tuned these round 1
-    # cfg["lr"] = hp.Choice("lr", [1e-4, 2e-4, 3e-4]) # -- was 2e-4, then picked 3e-4,
-    # cfg["warmup_frac"] = hp.Choice("warmup_frac", [0.05, 0.10, 0.15]) # -- was 0.10, then picked 0.05
-    # cfg["weight_decay"] = hp.Choice("weight_decay", [0.0, 1e-4, 3e-4]) # -- was 0.0 stayed 0.0
-    # cfg["ff_dropout"] = hp.Choice("ff_dropout", [0.10, 0.15, 0.20]) # -- was 0.15, picked 0.10
-    # cfg["attn_dropout"] = hp.Choice("attn_dropout", [0.05, 0.10, 0.15]) # -- stays 0.10
-    # cfg["embed_dropout"] = hp.Choice("embed_dropout", [0.00, 0.05, 0.10]) # -- was 0.05, picked 0.00
+    active_round = get_active_tuning_round_dict()
 
-    # Round 2a
-    # cfg["batch_full"] = hp.Choice("batch_full", [512, 1024, 2048, 4096]) # -- was 2048, picked 512
-    # cfg["lr"]         = hp.Choice("lr", [1e-4, 2e-4, 3e-4, 4e-4]) # -- was 3e-4, then picked 4e-4
-    # cfg["weight_decay"]  = hp.Choice("weight_decay", [0.0, 1e-5, 3e-5, 1e-4]) # -- was 0.0, then picked 1e-4
+    for param_name, param_info in active_round.items():
+        val = hp.Choice(param_name, param_info["choices"])
 
-    # Round 2b--did not select due to higher performace cost and not meaningful improvement
-    # cfg["d_token"]    = hp.Choice("d_token", [96, 128]) # -- picked 128, was 96
-    # cfg["n_blocks"]   = hp.Choice("n_blocks", [3, 4]) # -- picked 4, was 3
-    # cfg["resid_dropout"] = hp.Choice("resid_dropout", [0.0, 0.05, 0.10]) # -- picked 0.0, was 0.05
-    # cfg["head_dropout"]  = hp.Choice("head_dropout",  [0.0, 0.05, 0.10, 0.15]) # -- picked 0.1, was 0.1
+        if param_info["dtype"] == "int":
+            val = int(val)
+        elif param_info["dtype"] == "float":
+            val = float(val)
 
-    # Round 3
-    # cfg["num_tokens"] = hp.Choice("num_tokens", [1, 4])
+        cfg[param_name] = val
 
     return cfg
 
+def summarize_tuning_changes(base_cfg: dict, tuned_cfg: dict) -> dict:
+    changes = {}
+
+    for k in tuned_cfg:
+        base_val = base_cfg.get(k)
+        tuned_val = tuned_cfg.get(k)
+
+        if base_val != tuned_val:
+            changes[k] = {
+                "baseline": base_val,
+                "selected": tuned_val,
+                "changed": True,
+            }
+        else:
+            changes[k] = {
+                "baseline": base_val,
+                "selected": tuned_val,
+                "changed": False,
+            }
+
+    return changes
+
+def summarize_metric_improvement(baseline_metrics: dict, tuned_metrics: dict) -> dict:
+    out = {}
+
+    for k in tuned_metrics:
+        if k in baseline_metrics:
+            base = baseline_metrics[k]
+            tuned = tuned_metrics[k]
+
+            if base is not None and tuned is not None:
+                out[k] = {
+                    "baseline": base,
+                    "tuned": tuned,
+                    "delta": tuned - base,
+                    "improved": tuned < base
+                }
+
+    return out
+
+def get_tuning_metadata_for_run(
+    best_hp=None,
+    mode=None,
+    trial_epochs=None,
+    base_cfg=None,
+    tuned_cfg=None,
+    baseline_metrics=None,
+    tuned_metrics=None,
+) -> dict:
+
+    active_round_dict = get_active_tuning_round_dict() if TUNE else {}
+
+    change_summary = None
+    metric_summary = None
+
+    if base_cfg and tuned_cfg:
+        change_summary = summarize_tuning_changes(base_cfg, tuned_cfg)
+
+    if baseline_metrics and tuned_metrics:
+        metric_summary = summarize_metric_improvement(
+            baseline_metrics,
+            tuned_metrics
+        )
+
+    return {
+        "enabled": bool(TUNE),
+        "active_round": ACTIVE_TUNING_ROUND if TUNE else None,
+        "mode_requested": TUNE_WHEN,
+        "mode_this_run": mode,
+        "tuner_kind": TUNER_KIND if TUNE else None,
+        "objective": TUNER_OBJECTIVE if TUNE else None,
+        "max_trials": int(TUNER_MAX_TRIALS) if TUNE else None,
+        "executions_per_trial": int(TUNER_EXECUTIONS_PER_TRIAL) if TUNE else None,
+        "epochs_per_trial": int(trial_epochs) if (TUNE and trial_epochs is not None) else None,
+        "patience_smoke": int(TUNER_PATIENCE_SMOKE) if TUNE else None,
+        "patience_full": int(TUNER_PATIENCE_FULL) if TUNE else None,
+
+        "search_space": active_round_dict,
+        "best_hp": dict(best_hp.values) if best_hp is not None else None,
+
+        "param_changes": change_summary,
+        "metric_change": metric_summary,
+    }
 
 # ----------------------------------------------------------
 # 4) HyperModel so we can tune batch size per trial
@@ -2690,9 +2902,13 @@ def run_tuner_for_mode(mode: str):
         "tuner_kind": TUNER_KIND,
         "objective": TUNER_OBJECTIVE,
         "max_trials": int(TUNER_MAX_TRIALS),
+        "executions_per_trial": int(TUNER_EXECUTIONS_PER_TRIAL),
         "epochs_per_trial": int(trial_epochs),
+        "patience": int(TUNER_PATIENCE_SMOKE if mode == "smoke" else TUNER_PATIENCE_FULL),
+        "search_space": TUNING_SEARCH_SPACE,
         "best_hp": dict(best_hp.values),
     }
+
     atomic_write_json(Path(tuner_dir) / f"best_hp_{mode}_{tuner_project}.json", run_info)
 
     print("✅ Tuning DONE | best_hp:", best_hp.values)
@@ -2704,42 +2920,21 @@ def run_tuner_for_mode(mode: str):
 #    - smoke tuning: do NOT overwrite FT_CFG (sanity only)
 #    - full tuning:  DO overwrite FT_CFG so Step 6 uses it
 # ----------------------------------------------------------
-TUNED_KEYS_TO_APPLY = [
-    # "batch_full",
-    # "lr",
-    # "warmup_frac"
-    # "ff_dropout"
-    # "attn_dropout"
-    # "embed_dropout"
-    # "d_token",
-    # "n_blocks",
-    # "resid_dropout",
-    # "head_dropout",
-    # "weight_decay",
-    # "num_tokens",
-]
-
-INT_TUNED_KEYS = {
-    # "batch_full",
-    # "d_token",
-    # "n_blocks",
-    # "num_tokens",
-}
-
 best_hp = None
+
 if TUNE:
     if TUNE_WHEN in ("smoke", "both") and TRAIN_MODE == "smoke":
         best_hp = run_tuner_for_mode("smoke")
         print("ℹ️ Smoke tuning is sanity-only: FT_CFG NOT overwritten.")
+
     elif TUNE_WHEN in ("full", "both") and TRAIN_MODE == "full":
         best_hp = run_tuner_for_mode("full")
+
         if best_hp is not None:
-            for k in TUNED_KEYS_TO_APPLY:
-                if k in best_hp.values:
-                    FT_CFG[k] = int(best_hp.get(k)) if k in INT_TUNED_KEYS else float(best_hp.get(k))
+            applied_updates = apply_best_hp_to_ft_cfg(FT_CFG, best_hp)
 
             print("✅ FT_CFG updated (for Step 6 full training):")
-            print({k: FT_CFG.get(k) for k in TUNED_KEYS_TO_APPLY if k in best_hp.values})
+            print(applied_updates)
 ```
 
 #### Keras Model Training 
@@ -2851,6 +3046,21 @@ def _load_keras_rebuild_artifacts(*, base_dir: Path, kind: str) -> dict:
         "num_norm_std": {k: float(v) for k, v in num_norm_stats_saved["std"].items()},
         "lookup_vocabs": lookup_vocabs_saved,
     }
+
+def update_tuning_history(history_path: Path, record: dict):
+    """
+    Append one tuning record to tuning_history.json.
+    Creates the file if it does not exist yet.
+    """
+    if history_path.exists():
+        history = json.loads(history_path.read_text())
+        if not isinstance(history, list):
+            history = []
+    else:
+        history = []
+
+    history.append(record)
+    atomic_write_json(history_path, history)
 
 def _prepare_inputs_for_saved_artifacts(
     Xdf: pd.DataFrame,
@@ -3010,6 +3220,10 @@ else:
     best_dollars_path = KERAS_RUN_DIR / "best_by_val_rmse_dollars.weights.h5"  # optional, not currently written
 
     # Run info
+    trial_epochs_for_run = (
+        int(TUNER_EPOCHS_SMOKE) if TRAIN_MODE == "smoke" else int(TUNER_EPOCHS_FULL)
+    )
+
     run_info = {
         "run_ts": run_ts,
         "train_mode": TRAIN_MODE,
@@ -3020,6 +3234,11 @@ else:
         "num_cols": list(num_cols_nn),
         "cat_cols": list(cat_cols_nn),
         "ft_cfg": dict(FT_CFG),
+        "tuning": get_tuning_metadata_for_run(
+            best_hp=best_hp,
+            mode=TRAIN_MODE,
+            trial_epochs=trial_epochs_for_run,
+        ),
         "note": "FT-Transformer with WarmupCosine LR schedule and RMSE($) metric for early stopping",
     }
 
@@ -3422,6 +3641,43 @@ else:
     keras_test_clipped = keras_test_m["clipped"]
     keras_trainval_full = keras_trainval_m["full"]
     keras_trainval_clipped = keras_trainval_m["clipped"]
+
+    # ----------------------------
+    # Update Keras tuning history
+    # ----------------------------
+    if TUNE and (best_hp is not None):
+        trial_epochs_for_run = (
+            int(TUNER_EPOCHS_SMOKE) if TRAIN_MODE == "smoke" else int(TUNER_EPOCHS_FULL)
+        )
+
+        tuning_record = {
+            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "run_ts": globals().get("run_ts", None),
+            "keras_run_dir": str(KERAS_RUN_DIR) if KERAS_RUN_DIR is not None else None,
+            "active_round": ACTIVE_TUNING_ROUND,
+            "train_mode": TRAIN_MODE,
+            "tuner_kind": TUNER_KIND,
+            "objective": TUNER_OBJECTIVE,
+            "max_trials": int(TUNER_MAX_TRIALS),
+            "executions_per_trial": int(TUNER_EXECUTIONS_PER_TRIAL),
+            "epochs_per_trial": int(trial_epochs_for_run),
+            "patience": int(TUNER_PATIENCE_SMOKE if TRAIN_MODE == "smoke" else TUNER_PATIENCE_FULL),
+            "search_space": get_active_tuning_round_dict(),
+            "best_hp": dict(best_hp.values),
+            "metrics": {
+                "trainval": {
+                    "full": keras_trainval_full,
+                    "clipped": keras_trainval_clipped,
+                },
+                "test": {
+                    "full": keras_test_full,
+                    "clipped": keras_test_clipped,
+                },
+            },
+        }
+
+        update_tuning_history(KERAS_TUNING_HISTORY_PATH, tuning_record)
+        print("🧾 Updated Keras tuning history:", KERAS_TUNING_HISTORY_PATH)
 
     # ----------------------------
     # Permutation importance (per-feature)
