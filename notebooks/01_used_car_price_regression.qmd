@@ -173,7 +173,7 @@ TRAIN_MODE = "full"   # "smoke" | "full" | "skip"
 
 RETRAIN_RIDGE = False
 RETRAIN_CATBOOST = False
-RETRAIN_KERAS = True
+RETRAIN_KERAS = False
 
 # ===============================
 # Paths section
@@ -1134,6 +1134,15 @@ CATEGORICAL_FEATURES = [
 # Filter to columns that actually exist as safety check
 num_cols = [c for c in NUMERIC_FEATURES if c in X_train.columns]
 cat_cols = [c for c in CATEGORICAL_FEATURES if c in X_train.columns]
+
+# Keras aliases
+num_cols_nn = list(num_cols)
+cat_cols_nn = list(cat_cols)
+
+print("Shared numeric cols:", len(num_cols), num_cols)
+print("Shared categorical cols:", len(cat_cols), cat_cols)
+print("Keras numeric cols:", len(num_cols_nn), num_cols_nn)
+print("Keras categorical cols:", len(cat_cols_nn), cat_cols_nn)
 ```
 
 ### Evaluation Functions
@@ -1966,7 +1975,7 @@ np.random.seed(SEED)
 
 ```{python}
 # ----------------------------
-# Config
+# Step 1: Config
 # ----------------------------
 FT_CFG = {
     # training
@@ -2017,11 +2026,11 @@ FT_CFG = {
 # ----------------------------
 # Tuning controls
 # ----------------------------
-TUNE = True                 # master switch
-TUNE_WHEN = "full"          # "smoke" | "full" | "both"
-TUNER_KIND = "bayes"        # "bayes" or "random"
+TUNE = False                 # master switch
+TUNE_WHEN = "full"           # "smoke" | "full" | "both"
+TUNER_KIND = "bayes"         # "bayes" or "random"
 ACTIVE_TUNING_ROUND = "round_4"   # or "round_1", "round_2a", "round_2b", "round_3", "round_4"
-TUNER_MAX_TRIALS = 8      # start small; increase later (did 20 for full run)
+TUNER_MAX_TRIALS = 8              # start small; increase later -- did 20 for full run
 TUNER_EXECUTIONS_PER_TRIAL = 1
 
 # how long each tuning trial trains (keep short; Step 6 is the real training)
@@ -2032,35 +2041,8 @@ TUNER_EPOCHS_FULL  = 15      # was 25 for full run
 TUNER_PATIENCE_SMOKE = 2
 TUNER_PATIENCE_FULL  = 4     # was 6 for full run
 # what to optimize during tuning
-TUNER_OBJECTIVE = "val_loss"  # keep aligned with restore_best_weights on val_loss
-# alternative: "val_rmse_dollars"
-```
+TUNER_OBJECTIVE = "val_loss" # keep aligned with restore_best_weights on val_loss
 
-```{python}
-# ----------------------------
-# Step 1: Define feature columns 
-# ----------------------------
-NUM_COLS_BASE = [
-    "mileage", "mpg_avg", "price_drop", "seller_rating", "driver_rating",
-    "driver_reviews_num", "accidents_or_damage", "one_owner", "personal_use_only",
-    "age", "mileage_per_year", "engine_liters", "engine_cylinders",
-    "engine_turbo", "engine_hybrid", "transmission_gears", "transmission_gears_missing",
-    "is_luxury_brand", "luxury_age_interaction",
-]
-CAT_COLS_BASE = [
-    "manufacturer", "model", "drivetrain", "fuel_type", "engine_layout",
-    "transmission_clean", "exterior_color_base", "interior_color_base",
-]
-
-num_cols_nn = [c for c in NUM_COLS_BASE if c in X_train.columns]
-cat_cols_nn = [c for c in CAT_COLS_BASE if c in X_train.columns]
-
-print("Numeric cols:", len(num_cols_nn), num_cols_nn)
-print("Categorical cols:", len(cat_cols_nn), cat_cols_nn)
-```
-
-#### Keras Model Preprossesing 
-```{python}
 # ----------------------------
 # Paths 
 # ----------------------------
@@ -2090,7 +2072,10 @@ def _keras_latest_exists() -> bool:
 
 def _touches_latest() -> bool:
     return TRAIN_MODE == "full"
+```
 
+#### Keras Model Preprossesing 
+```{python}
 # ----------------------------
 # Step 2: Prepare train/val/test (NN copies) + imputations
 # ----------------------------
@@ -2539,7 +2524,7 @@ def build_model_with_cfg(cfg: dict, *, n_train_rows: int, epochs: int, batch_siz
     )
 
     # IMPORTANT: build_ft_transformer_model reads global FT_CFG
-    # so we temporarily swap it, build, then restore.
+    # so temporarily swap it, build, then restore.
     global FT_CFG
     _backup = dict(FT_CFG)
     FT_CFG = dict(cfg)
@@ -3021,7 +3006,7 @@ def make_callbacks(train_mode: str):
     ES_PAT = FT_CFG["es_patience_smoke"] if train_mode == "smoke" else FT_CFG["es_patience_full"]
     return [
         keras.callbacks.EarlyStopping(
-            monitor="val_loss",  #"val_rmse_dollars"  "val_loss" <-- dollars metric
+            monitor="val_loss",  
             mode="min",
             patience=int(ES_PAT),
             restore_best_weights=True,
@@ -3394,8 +3379,6 @@ else:
             kind=KERAS_EVAL_ARTIFACT_KIND,
         )
 
-        # If this model was trained in the current run, use the same already-prepared
-        # tensors used during training so evaluation is perfectly aligned.
         if KERAS_MODEL_SOURCE == "trained_this_run":
             test_inputs_tf_eval = test_inputs_tf
 
@@ -3507,7 +3490,6 @@ else:
 
     # ----------------------------
     # Permutation importance (per-feature)
-    # Works with the current evaluation flow
     # ----------------------------
     def permutation_importance_keras_per_feature(
         base_inputs: dict,
@@ -3712,6 +3694,8 @@ else:
     except Exception as e:
         print("⚠️ Permutation importance failed:", e)
 
+
+    # Training Graphs
     if ("history" in globals()) and (history is not None):
         hist = history.history if hasattr(history, "history") else {}
         if ("loss" in hist) or ("val_loss" in hist) or ("rmse_dollars" in hist) or ("val_rmse_dollars" in hist):
