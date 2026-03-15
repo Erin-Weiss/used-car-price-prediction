@@ -83,9 +83,9 @@ This report runs **locally**. It uses:
 >   - `raw/` (created)
 >     - `cars.csv` (raw dataset)
 >   - `processed/` (created)
->     - `cars_cleaned.parquet` (written)
->     - `cars_features.parquet` (written)
->     - `splits_indices_v1.json` (written; shared train/val/test indices)
+>     - `cars_cleaned_v{FEATURE_PIPELINE_VERSION}.parquet` (written)
+>     - `cars_features_v{FEATURE_PIPELINE_VERSION}.parquet` (written)
+>     - `splits_indices_v{FEATURE_PIPELINE_VERSION}.json` (written; shared train/val/test indices)
 >
 > - `models/` (created)
 >   - `metrics/` (created)
@@ -94,6 +94,7 @@ This report runs **locally**. It uses:
 >
 >   - `ridge/` (created)
 >     - `ridge_pipeline.joblib` (latest pointer; written only on `TRAIN_MODE="full"`)
+>     - `ridge_run_info.json` (latest metadata; used for schema validation)
 >     - `run_{timestamp}_{train_mode}/` (created)
 >       - `ridge_pipeline.joblib` (versioned)
 >       - `run_info.json` (written)
@@ -101,6 +102,7 @@ This report runs **locally**. It uses:
 >
 >   - `catboost/` (created)
 >     - `catboost_final.cbm` (latest pointer; written only on `TRAIN_MODE="full"`)
+>     - `catboost_run_info.json` (latest metadata; used for schema validation)
 >     - `run_{timestamp}_{train_mode}/` (created)
 >       - `catboost_final.cbm` (versioned)
 >       - `run_info.json` (written)
@@ -109,20 +111,35 @@ This report runs **locally**. It uses:
 >       - `metrics.json` (written)
 >
 >   - `keras/` (created)
->     - `keras_model.keras` (latest pointer; written only on `TRAIN_MODE="full"`)
->     - `run_{timestamp}_{train_mode}/` (created)
->       - `keras_model.keras` (versioned)
->       - `run_info.json` (written)
->       - `best_hp.json` (written)
->       - `keras_metrics.json` (written)
->       - `tuning/` (created)
->         - `hyperband/`
->         - `bayes/`
+>     - `keras_model.weights.h5` (latest pointer; written only on `TRAIN_MODE="full"`)
+>     - `keras_run_info.json` (latest metadata)
+>     - `train_medians.json` (latest numeric imputation values)
+>     - `num_norm_stats.json` (latest normalization statistics)
+>     - `lookup_vocabs.json` (latest categorical vocabularies)
+>     - `runs/`
+>       - `run_{timestamp}_{train_mode}/` (created)
+>         - `keras_model.weights.h5` (versioned trained weights)
+>         - `run_info.json` (written)
+>         - `best_hp.json` (written if tuning enabled)
+>         - `keras_metrics.json` (written)
+>         - `train_medians.json` (numeric imputation values)
+>         - `num_norm_stats.json` (normalization mean/std)
+>         - `lookup_vocabs.json` (categorical vocabularies)
+>     - `tuner/`
+>       - `hyperband/`
+>       - `bayes/`
 >
 > - `notebooks/`
 > - `reports/` (empty)
 > - `scripts/` (empty)
 > - `src/`
+
+Artifact management and reproducibility are handled through a lightweight versioning system.  
+The variable `FEATURE_PIPELINE_VERSION` controls the version of cleaned datasets, engineered feature tables, and the shared train/validation/test split indices. When data cleaning or feature engineering logic changes, this version is incremented so cached artifacts are automatically regenerated and stale datasets are not reused.
+
+Each model directory stores both **versioned run artifacts** (`run_{timestamp}_{train_mode}`) and **latest pointers** used for evaluation and `TRAIN_MODE="skip"` workflows. Versioned runs preserve the full history of experiments, while the latest pointer provides a stable reference for downstream evaluation.
+
+Additional metadata files (such as `ridge_run_info.json` and `catboost_run_info.json`) record the expected feature schema and pipeline version. When loading saved models, the code validates that the current feature pipeline matches the schema used during training, preventing accidental evaluation of models against incompatible feature sets.
 
 ## Project Setup
 ```{python}
@@ -158,7 +175,6 @@ import joblib
 import tensorflow as tf
 from tensorflow import keras
 from tensorflow.keras import layers
-# import keras_tuner as kt (imported if tune later)
 import keras_tuner as kt
 
 # ===============================
@@ -208,8 +224,6 @@ for d in [RAW_DIR, PROCESSED_DIR, MODEL_DIR]:
 # Raw/processed paths
 # ----------------------------
 RAW_CSV = RAW_DIR / "cars.csv"
-# CLEAN_PARQUET = PROCESSED_DIR / "cars_cleaned.parquet"
-# FEATURES_PARQUET = PROCESSED_DIR / "cars_features.parquet"
 
 # Bump this version whenever cleaning or feature-engineering logic changes.
 # This prevents stale cached parquet/split artifacts from being silently reused.
@@ -390,6 +404,8 @@ RIDGE_DIR.mkdir(parents=True, exist_ok=True)
 RIDGE_LATEST_PATH = RIDGE_DIR / "ridge_pipeline.joblib"
 RIDGE_PATH = RIDGE_LATEST_PATH
 
+RIDGE_LATEST_RUN_INFO_PATH = RIDGE_DIR / "ridge_run_info.json"
+
 # ----------------------------
 # CatBoost artifact paths
 # ----------------------------
@@ -408,6 +424,8 @@ FINAL_DONE = CATBOOST_DIR / "catboost_done.txt"
 CATBOOST_FINAL_PATH = CATBOOST_DIR / "catboost_final.cbm"
 FEATURE_COLS_PATH = CATBOOST_DIR / "feature_columns.json"
 
+CATBOOST_LATEST_RUN_INFO_PATH = CATBOOST_DIR / "catboost_run_info.json"
+
 STAGE1_INPROGRESS = CATBOOST_DIR / "catboost_stage1_in_progress.txt"
 STAGE2_INPROGRESS = CATBOOST_DIR / "catboost_stage2_in_progress.txt"
 FINAL_INPROGRESS  = CATBOOST_DIR / "catboost_in_progress.txt"
@@ -418,9 +436,20 @@ FINAL_INPROGRESS  = CATBOOST_DIR / "catboost_in_progress.txt"
 KERAS_DIR = MODEL_DIR / "keras"
 KERAS_DIR.mkdir(parents=True, exist_ok=True)
 
-KERAS_LATEST_PATH = KERAS_DIR / "keras_model.keras"
 KERAS_RUNS_DIR = KERAS_DIR
 KERAS_RUNS_DIR.mkdir(parents=True, exist_ok=True)
+
+KERAS_RUNS_DIR = KERAS_DIR / "runs"
+KERAS_RUNS_DIR.mkdir(parents=True, exist_ok=True)
+
+KERAS_TUNING_HISTORY_PATH = KERAS_DIR / "tuning_history.json"
+
+# Weights-based latest artifacts
+KERAS_LATEST_WEIGHTS_PATH = KERAS_DIR / "keras_model.weights.h5"
+KERAS_LATEST_RUN_INFO_PATH = KERAS_DIR / "keras_run_info.json"
+KERAS_LATEST_TRAIN_MEDIANS_PATH = KERAS_DIR / "keras_train_medians.json"
+KERAS_LATEST_NUM_NORM_STATS_PATH = KERAS_DIR / "keras_num_norm_stats.json"
+KERAS_LATEST_LOOKUP_VOCABS_PATH = KERAS_DIR / "keras_lookup_vocabs.json"
 
 # ----------------------------
 # Metrics artifact paths
@@ -430,8 +459,6 @@ METRICS_DIR.mkdir(parents=True, exist_ok=True)
 
 METRICS_LATEST_PATH = METRICS_DIR / "metrics_latest.json"
 METRICS_PATH = METRICS_LATEST_PATH
-
-PROJECT_ROOT, RAW_CSV
 
 # ===============================
 # Load or clean dataframes
@@ -478,6 +505,26 @@ def mark_in_progress(path: Path, text: str = "in_progress"):
 def clear_file(path: Path):
     if path.exists():
         path.unlink()
+
+def assert_saved_schema_matches(
+    *,
+    saved_feature_version,
+    saved_feature_columns,
+    current_feature_version,
+    current_feature_columns,
+    model_name: str,
+):
+    if saved_feature_version != current_feature_version:
+        raise ValueError(
+            f"{model_name}: saved feature version {saved_feature_version!r} "
+            f"does not match current version {current_feature_version!r}."
+        )
+
+    if list(saved_feature_columns) != list(current_feature_columns):
+        raise ValueError(
+            f"{model_name}: saved feature columns do not match current feature columns. "
+            "This usually means the feature engineering pipeline changed or column order differs."
+        )
 ```
 
 ```{python}
@@ -504,7 +551,9 @@ if str(PROJECT_ROOT) not in sys.path:
 # The notebook remains the primary reference version.
 
 # NOTE: This does not change notebook execution logic; it just keeps a reusable copy in src/.
-# NOTE: If editing build_features below need to update cars_features_v[insert here].parquet
+
+# NOTE: If cleaning or feature-engineering logic changes, bump FEATURE_PIPELINE_VERSION.
+# Also keep the exported src/pipeline.py copy aligned with the notebook version.
 
 PIPELINE_PY = PROJECT_ROOT / "src" / "pipeline.py"
 PIPELINE_PY.parent.mkdir(parents=True, exist_ok=True)
@@ -905,14 +954,15 @@ plt.show()
 
 ## Feature Engineering and Save New Parquet
 ```{python}
-# NOTE: If editing build_features below need to update cars_features_v[insert here].parquet and src code
+# NOTE: If cleaning or feature-engineering logic changes, bump FEATURE_PIPELINE_VERSION.
+# Also keep the exported src/pipeline.py copy aligned with the notebook version.
 
 def build_features_df():
     # start from cleaned df already in memory
     y = np.log1p(df_cleaned["price"])
     X = df_cleaned.drop(columns=["price", "seller_name"], errors="ignore").copy()
 
-    REFERENCE_YEAR = 2023 #The dataset ends in the beginning of 2023
+    REFERENCE_YEAR = 2023 # The dataset ends in the beginning of 2023
 
     # age and mileage per year
     X["age"] = REFERENCE_YEAR - X["year"]
@@ -1091,7 +1141,6 @@ display(X.isnull().sum().sort_values(ascending=False))
 # Reproducible train/val/test split
 # ----------------------------
 SPLIT_SEED = 42
-# SPLITS_PATH = PROCESSED_DIR / "splits_indices_v1.json"
 
 def make_or_load_splits(X, y, path=SPLITS_PATH, seed=SPLIT_SEED, test_size=0.2, val_size=0.2):
     """
@@ -1196,36 +1245,6 @@ def regression_metrics(y_true, y_pred) -> dict:
         "n": int(len(y_true)),
     }
 
-# def clipped_mask_by_y_true(y_true, q_low=0.01, q_high=0.99):
-#     """
-#     Mask rows where y_true is within [q_low, q_high] quantiles.
-#     Clipping is based ONLY on y_true.
-#     """
-#     y_true = np.asarray(y_true)
-#     lo, hi = np.quantile(y_true, [q_low, q_high])
-#     mask = (y_true >= lo) & (y_true <= hi)
-#     return mask, float(lo), float(hi)
-
-# def metrics_full_and_clipped(y_true, y_pred, q_low=0.01, q_high=0.99) -> dict:
-#     """
-#     Returns metrics for:
-#       - full set
-#       - clipped set (based on y_true quantiles)
-#     """
-#     y_true = np.asarray(y_true)
-#     y_pred = np.asarray(y_pred)
-
-#     out = {}
-#     out["full"] = regression_metrics(y_true, y_pred)
-
-#     mask, lo, hi = clipped_mask_by_y_true(y_true, q_low=q_low, q_high=q_high)
-#     out["clipped"] = regression_metrics(y_true[mask], y_pred[mask])
-#     out["clipped"]["clip_q_low"] = float(q_low)
-#     out["clipped"]["clip_q_high"] = float(q_high)
-#     out["clipped"]["clip_lo"] = lo
-#     out["clipped"]["clip_hi"] = hi
-#     return out
-
 def metrics_full_and_clipped(y_true, y_pred, q_low=0.01, q_high=0.99,
                               clip_lo=None, clip_hi=None) -> dict:
     y_true = np.asarray(y_true)
@@ -1286,6 +1305,23 @@ best_ridge = None
 
 if RIDGE_PATH.exists() and not RETRAIN_RIDGE:
     print("✅ Loading existing Ridge model (RETRAIN_RIDGE=False)")
+
+    if not RIDGE_LATEST_RUN_INFO_PATH.exists():
+        raise FileNotFoundError(
+            f"Ridge latest metadata file not found: {RIDGE_LATEST_RUN_INFO_PATH}. "
+            "Retrain Ridge once to create matching schema metadata."
+        )
+
+    ridge_saved_info = json.loads(RIDGE_LATEST_RUN_INFO_PATH.read_text())
+
+    assert_saved_schema_matches(
+        saved_feature_version=ridge_saved_info["feature_pipeline_version"],
+        saved_feature_columns=ridge_saved_info["feature_columns"],
+        current_feature_version=FEATURE_PIPELINE_VERSION,
+        current_feature_columns=list(X_train.columns),
+        model_name="Ridge",
+    )
+
     best_ridge = joblib.load(RIDGE_PATH)
 
 else:
@@ -1359,12 +1395,15 @@ else:
         "best_cv_rmse_log": float(-gs.best_score_) if "gs" in locals() else None,
         "num_cols": list(num_cols),
         "cat_cols": list(cat_cols),
+        "feature_pipeline_version": FEATURE_PIPELINE_VERSION,
+        "feature_columns": list(X_train.columns),
     }
     atomic_write_json(RIDGE_RUN_DIR / "run_info.json", ridge_run_info)
 
     # Update "latest" ONLY for full mode 
     if TRAIN_MODE == "full":
         joblib.dump(best_ridge, RIDGE_LATEST_PATH)
+        atomic_write_json(RIDGE_LATEST_RUN_INFO_PATH, ridge_run_info)
         print("✅ Updated latest Ridge:", RIDGE_LATEST_PATH)
     else:
         print("🚫 Smoke run: NOT updating latest Ridge pointer.")
@@ -1388,6 +1427,23 @@ if ("TRAIN_MODE" in globals()) and (TRAIN_MODE == "skip"):
     if best_ridge is None:
         if RIDGE_LATEST.exists():
             print("✅ TRAIN_MODE='skip' — loading latest Ridge model for evaluation:\n ", RIDGE_LATEST)
+
+            if not RIDGE_LATEST_RUN_INFO_PATH.exists():
+                raise FileNotFoundError(
+                    f"Ridge latest metadata file not found: {RIDGE_LATEST_RUN_INFO_PATH}. "
+                    "Retrain Ridge once to create matching schema metadata."
+                )
+
+            ridge_saved_info = json.loads(RIDGE_LATEST_RUN_INFO_PATH.read_text())
+
+            assert_saved_schema_matches(
+                saved_feature_version=ridge_saved_info["feature_pipeline_version"],
+                saved_feature_columns=ridge_saved_info["feature_columns"],
+                current_feature_version=FEATURE_PIPELINE_VERSION,
+                current_feature_columns=list(X_train.columns),
+                model_name="Ridge",
+            )
+
             best_ridge = joblib.load(RIDGE_LATEST)
         else:
             print("⏭️ TRAIN_MODE='skip' — no saved Ridge model found; skipping Ridge evaluation.")
@@ -1403,8 +1459,6 @@ else:
     ridge_pred_log_test = best_ridge.predict(X_test)
     ridge_pred_test = np.expm1(ridge_pred_log_test)
     ridge_true_test = np.expm1(y_test)
-
-    # ridge_m = metrics_full_and_clipped(ridge_true_test, ridge_pred_test, q_low=0.01, q_high=0.99)
 
     ridge_m = metrics_full_and_clipped(ridge_true_test, ridge_pred_test, clip_lo=CLIP_LO, clip_hi=CLIP_HI)
     print(f"RIDGE TEST RMSE ($): {ridge_m['full']['rmse']:,.0f}")
@@ -1458,8 +1512,6 @@ else:
     ridge_pred_trainval = np.expm1(ridge_pred_trainval_log)
     ridge_true_trainval = np.expm1(y_trainval)
 
-    # ridge_tv = metrics_full_and_clipped(ridge_true_trainval, ridge_pred_trainval, q_low=0.01, q_high=0.99)
-
     ridge_tv = metrics_full_and_clipped(ridge_true_trainval, ridge_pred_trainval, clip_lo=CLIP_LO, clip_hi=CLIP_HI)
     display(metrics_to_df(ridge_tv, "Ridge (Train+Val)"))
 
@@ -1492,11 +1544,13 @@ else:
                 "train_mode": TRAIN_MODE if "TRAIN_MODE" in globals() else None,
                 "latest_pointer": str(RIDGE_LATEST),
                 "run_dir": str(RIDGE_RUN_DIR),
-                "split_policy": "shared_indices_v1_json" if "SPLITS_PATH" in globals() else None,
+                "split_policy": str(SPLITS_PATH.name) if "SPLITS_PATH" in globals() else None,
                 "clip_policy": {
-                    "basis": "y_true_quantiles",
+                    "basis": "y_train_quantiles",
                     "q_low": 0.01,
                     "q_high": 0.99,
+                    "clip_lo": float(CLIP_LO),
+                    "clip_hi": float(CLIP_HI),
                 },
             },
             "ridge": {
@@ -1700,6 +1754,22 @@ RUN_DIR = None
 if TRAIN_MODE == "skip":
     print("⏭️ Skipping CatBoost training (TRAIN_MODE='skip').")
     if CATBOOST_FINAL_PATH.exists():
+        if not CATBOOST_LATEST_RUN_INFO_PATH.exists():
+            raise FileNotFoundError(
+                f"CatBoost latest metadata file not found: {CATBOOST_LATEST_RUN_INFO_PATH}. "
+                "Retrain CatBoost once to create matching schema metadata."
+            )
+
+        cb_saved_info = json.loads(CATBOOST_LATEST_RUN_INFO_PATH.read_text())
+
+        assert_saved_schema_matches(
+            saved_feature_version=cb_saved_info["feature_pipeline_version"],
+            saved_feature_columns=cb_saved_info["feature_columns"],
+            current_feature_version=FEATURE_PIPELINE_VERSION,
+            current_feature_columns=list(X_train.columns),
+            model_name="CatBoost",
+        )
+
         final_cb = CatBoostRegressor()
         final_cb.load_model(str(CATBOOST_FINAL_PATH))
         print("✅ Loaded CatBoost final model:", CATBOOST_FINAL_PATH)
@@ -1713,6 +1783,23 @@ else:
     if (TRAIN_MODE == "full") and CATBOOST_FINAL_PATH.exists() and (not RETRAIN_CATBOOST):
         print("✅ Loading existing CatBoost final model (RETRAIN_CATBOOST=False, TRAIN_MODE='full'):")
         print("  ", CATBOOST_FINAL_PATH)
+
+        if not CATBOOST_LATEST_RUN_INFO_PATH.exists():
+            raise FileNotFoundError(
+                f"CatBoost latest metadata file not found: {CATBOOST_LATEST_RUN_INFO_PATH}. "
+                "Retrain CatBoost once to create matching schema metadata."
+            )
+
+        cb_saved_info = json.loads(CATBOOST_LATEST_RUN_INFO_PATH.read_text())
+
+        assert_saved_schema_matches(
+            saved_feature_version=cb_saved_info["feature_pipeline_version"],
+            saved_feature_columns=cb_saved_info["feature_columns"],
+            current_feature_version=FEATURE_PIPELINE_VERSION,
+            current_feature_columns=list(X_train.columns),
+            model_name="CatBoost",
+        )
+
         final_cb = CatBoostRegressor()
         final_cb.load_model(str(CATBOOST_FINAL_PATH))
 
@@ -1761,6 +1848,8 @@ else:
             "refit_on_trainval": bool(refit_on_trainval),
             "refit_iteration_buffer": float(refit_iteration_buffer),
             "updates_latest": bool(should_update_latest(TRAIN_MODE)),
+            "feature_pipeline_version": FEATURE_PIPELINE_VERSION,
+            "feature_columns": list(X_train_cb.columns),
         }
         atomic_write_json(RUN_DIR / "run_info.json", run_info)
         print("📝 Wrote run metadata:", RUN_DIR / "run_info.json")
@@ -2048,6 +2137,7 @@ else:
             # Only FULL updates "latest"
             if should_update_latest(TRAIN_MODE):
                 final_cb.save_model(str(CATBOOST_FINAL_PATH))
+                atomic_write_json(CATBOOST_LATEST_RUN_INFO_PATH, run_info)
                 print("✅ Updated latest:", CATBOOST_FINAL_PATH)
             else:
                 print("🚫 Smoke run: NOT updating latest pointer.")
@@ -2099,8 +2189,6 @@ else:
     cb_pred_train = np.expm1(final_cb.predict(X_train))
     cb_true_train = np.expm1(y_train)
 
-    # cb_tr = metrics_full_and_clipped(cb_true_train, cb_pred_train, q_low=0.01, q_high=0.99)
-
     cb_tr = metrics_full_and_clipped(cb_true_train, cb_pred_train, clip_lo=CLIP_LO, clip_hi=CLIP_HI)
     display(metrics_to_df(cb_tr, "CatBoost (Train)"))
 
@@ -2111,8 +2199,6 @@ else:
     # ----------------------------
     cb_pred_val = np.expm1(final_cb.predict(X_val))
     cb_true_val = np.expm1(y_val)
-
-    # cb_v = metrics_full_and_clipped(cb_true_val, cb_pred_val, q_low=0.01, q_high=0.99)
 
     cb_v = metrics_full_and_clipped(cb_true_val, cb_pred_val, clip_lo=CLIP_LO, clip_hi=CLIP_HI)
 
@@ -2127,8 +2213,6 @@ else:
     cb_pred_test = np.expm1(final_cb.predict(X_test))
     cb_true_test = np.expm1(y_test)
 
-    # cb_m = metrics_full_and_clipped(cb_true_test, cb_pred_test, q_low=0.01, q_high=0.99)
-
     cb_m = metrics_full_and_clipped(cb_true_test, cb_pred_test, clip_lo=CLIP_LO, clip_hi=CLIP_HI)
     print(f"CATBOOST TEST RMSE ($): {cb_m['full']['rmse']:,.0f}")
 
@@ -2142,8 +2226,6 @@ else:
 
     cb_pred_trainval = np.expm1(final_cb.predict(X_trainval_cb))
     cb_true_trainval = np.expm1(y_trainval_cb)
-
-    # cb_tv = metrics_full_and_clipped(cb_true_trainval, cb_pred_trainval, q_low=0.01, q_high=0.99)
 
     cb_tv = metrics_full_and_clipped(cb_true_trainval, cb_pred_trainval, clip_lo=CLIP_LO, clip_hi=CLIP_HI)
     display(metrics_to_df(cb_tv, "CatBoost (Train+Val)"))
@@ -2268,22 +2350,8 @@ TUNER_PATIENCE_FULL  = 4     # was 6 for full run
 TUNER_OBJECTIVE = "val_loss" # keep aligned with restore_best_weights on val_loss
 
 # ----------------------------
-# Paths 
+# Paths Check Helpers
 # ----------------------------
-KERAS_DIR = MODEL_DIR / "keras"
-KERAS_DIR.mkdir(parents=True, exist_ok=True)
-
-KERAS_RUNS_DIR = KERAS_DIR / "runs"
-KERAS_RUNS_DIR.mkdir(parents=True, exist_ok=True)
-
-KERAS_TUNING_HISTORY_PATH = KERAS_DIR / "tuning_history.json"
-
-# Weights-based latest artifacts
-KERAS_LATEST_WEIGHTS_PATH = KERAS_DIR / "keras_model.weights.h5"
-KERAS_LATEST_RUN_INFO_PATH = KERAS_DIR / "keras_run_info.json"
-KERAS_LATEST_TRAIN_MEDIANS_PATH = KERAS_DIR / "keras_train_medians.json"
-KERAS_LATEST_NUM_NORM_STATS_PATH = KERAS_DIR / "keras_num_norm_stats.json"
-KERAS_LATEST_LOOKUP_VOCABS_PATH = KERAS_DIR / "keras_lookup_vocabs.json"
 
 def _keras_latest_exists() -> bool:
     return (
@@ -3673,15 +3741,11 @@ else:
     true_test = np.expm1(y_test_nn.astype("float64"))
     pred_test = predict_dollars(test_inputs_tf_eval)
 
-    # keras_test_m = metrics_full_and_clipped(true_test, pred_test, q_low=0.01, q_high=0.99)
-
     keras_test_m = metrics_full_and_clipped(true_test, pred_test, clip_lo=CLIP_LO, clip_hi=CLIP_HI)
     display(metrics_to_df(keras_test_m, "FT-Transformer (Test)"))
 
     true_trainval = np.expm1(y_trainval_eval.astype("float64"))
     pred_trainval = predict_dollars(trainval_inputs_tf_eval)
-
-    # keras_trainval_m = metrics_full_and_clipped(true_trainval, pred_trainval, q_low=0.01, q_high=0.99)
 
     keras_trainval_m = metrics_full_and_clipped(true_trainval, pred_trainval, clip_lo=CLIP_LO, clip_hi=CLIP_HI)
     display(metrics_to_df(keras_trainval_m, "FT-Transformer (Train+Val)"))
@@ -3989,6 +4053,13 @@ metrics["_meta"] = {
     "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
     "train_mode": TRAIN_MODE if "TRAIN_MODE" in globals() else None,
     "updates_latest": (TRAIN_MODE == "full") if "TRAIN_MODE" in globals() else None,
+
+    "retrain_flags": {
+        "ridge": bool(RETRAIN_RIDGE) if "RETRAIN_RIDGE" in globals() else None,
+        "catboost": bool(RETRAIN_CATBOOST) if "RETRAIN_CATBOOST" in globals() else None,
+        "keras": bool(RETRAIN_KERAS) if "RETRAIN_KERAS" in globals() else None,
+    },
+
     "rows": {
         "train": int(len(X_train)) if "X_train" in globals() else None,
         "val": int(len(X_val)) if "X_val" in globals() else None,
@@ -3996,12 +4067,15 @@ metrics["_meta"] = {
         "total": int(len(X)) if "X" in globals() else None,
     },
     "clip_policy": {
-        "basis": "y_true_quantiles",
+        "basis": "y_train_quantiles",
         "q_low": 0.01,
         "q_high": 0.99,
+        "clip_lo": float(CLIP_LO),
+        "clip_hi": float(CLIP_HI),
         "note": (
-            "Clipped metrics computed on subsets where true price is within "
-            "[q_low, q_high] quantiles; predictions are never used for clipping."
+            "Clip bounds are the 1st and 99th percentiles of the training set's "
+            "true prices (in dollars). The same bounds are applied to all splits "
+            "so clipped metrics are directly comparable across train, val, and test."
         ),
     },
 }
