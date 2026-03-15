@@ -208,8 +208,16 @@ for d in [RAW_DIR, PROCESSED_DIR, MODEL_DIR]:
 # Raw/processed paths
 # ----------------------------
 RAW_CSV = RAW_DIR / "cars.csv"
-CLEAN_PARQUET = PROCESSED_DIR / "cars_cleaned.parquet"
-FEATURES_PARQUET = PROCESSED_DIR / "cars_features.parquet"
+# CLEAN_PARQUET = PROCESSED_DIR / "cars_cleaned.parquet"
+# FEATURES_PARQUET = PROCESSED_DIR / "cars_features.parquet"
+
+# Bump this version whenever cleaning or feature-engineering logic changes.
+# This prevents stale cached parquet/split artifacts from being silently reused.
+FEATURE_PIPELINE_VERSION = "v2"
+
+CLEAN_PARQUET = PROCESSED_DIR / f"cars_cleaned_{FEATURE_PIPELINE_VERSION}.parquet"
+FEATURES_PARQUET = PROCESSED_DIR / f"cars_features_{FEATURE_PIPELINE_VERSION}.parquet"
+SPLITS_PATH = PROCESSED_DIR / f"splits_indices_{FEATURE_PIPELINE_VERSION}.json"
 
 # ===============================
 # Kaggle dataset download helper
@@ -481,7 +489,20 @@ if str(PROJECT_ROOT) not in sys.path:
 ## Export Reusable Code to /src 
 > Note: only feature engineering and dataset cleaning for now
 ```{python}
-# Write the cleaning + feature engineering logic into src/pipeline.py
+# -------------------------------------------------------
+# Optional: export preprocessing logic to src/pipeline.py
+# -------------------------------------------------------
+
+# The full pipeline is kept directly in this notebook so
+# the rendered HTML portfolio page contains the complete
+# implementation in one place.
+
+# For readers interested in a modular project structure,
+# the core cleaning and feature engineering functions are
+# also exported to src/pipeline.py as a reusable module.
+
+# The notebook remains the primary reference version.
+
 # NOTE: This does not change notebook execution logic; it just keeps a reusable copy in src/.
 # NOTE: If editing build_features below need to update cars_features_v[insert here].parquet
 
@@ -714,6 +735,15 @@ def build_cleaned_df():
     )
     df_cleaned = df_cleaned.drop(columns="mpg")
 
+    # For this project it intentionally starts with a fully observed subset
+    # of the dataset to simplify early feature engineering and modeling.
+    
+    # The dataset is large enough that dropping incomplete rows does not
+    # materially reduce training data.
+    
+    # Some later feature engineering steps reintroduced sparse missing
+    # values (e.g., parsed engine specs), which are handled downstream
+    # using missingness indicators and model-specific imputations.
     df_cleaned = df_cleaned.dropna().reset_index(drop=True)
 
     bin_cols = ["accidents_or_damage", "one_owner", "personal_use_only"]
@@ -1061,7 +1091,7 @@ display(X.isnull().sum().sort_values(ascending=False))
 # Reproducible train/val/test split
 # ----------------------------
 SPLIT_SEED = 42
-SPLITS_PATH = PROCESSED_DIR / "splits_indices_v1.json"
+# SPLITS_PATH = PROCESSED_DIR / "splits_indices_v1.json"
 
 def make_or_load_splits(X, y, path=SPLITS_PATH, seed=SPLIT_SEED, test_size=0.2, val_size=0.2):
     """
@@ -1110,6 +1140,12 @@ X_val,   y_val   = X.iloc[val_idx],   y.iloc[val_idx]
 X_test,  y_test  = X.iloc[test_idx],  y.iloc[test_idx]
 
 print("Rows:", {"train": len(X_train), "val": len(X_val), "test": len(X_test)})
+
+# Shared clip bounds for clipped metrics (computed from training set only)
+train_true_dollars = np.expm1(y_train)
+CLIP_LO, CLIP_HI = np.quantile(train_true_dollars, [0.01, 0.99])
+print(f"Clip bounds (from train): ${CLIP_LO:,.0f} – ${CLIP_HI:,.0f}")
+
 ```
 
 ## Model Section
@@ -1160,34 +1196,56 @@ def regression_metrics(y_true, y_pred) -> dict:
         "n": int(len(y_true)),
     }
 
-def clipped_mask_by_y_true(y_true, q_low=0.01, q_high=0.99):
-    """
-    Mask rows where y_true is within [q_low, q_high] quantiles.
-    Clipping is based ONLY on y_true.
-    """
-    y_true = np.asarray(y_true)
-    lo, hi = np.quantile(y_true, [q_low, q_high])
-    mask = (y_true >= lo) & (y_true <= hi)
-    return mask, float(lo), float(hi)
+# def clipped_mask_by_y_true(y_true, q_low=0.01, q_high=0.99):
+#     """
+#     Mask rows where y_true is within [q_low, q_high] quantiles.
+#     Clipping is based ONLY on y_true.
+#     """
+#     y_true = np.asarray(y_true)
+#     lo, hi = np.quantile(y_true, [q_low, q_high])
+#     mask = (y_true >= lo) & (y_true <= hi)
+#     return mask, float(lo), float(hi)
 
-def metrics_full_and_clipped(y_true, y_pred, q_low=0.01, q_high=0.99) -> dict:
-    """
-    Returns metrics for:
-      - full set
-      - clipped set (based on y_true quantiles)
-    """
+# def metrics_full_and_clipped(y_true, y_pred, q_low=0.01, q_high=0.99) -> dict:
+#     """
+#     Returns metrics for:
+#       - full set
+#       - clipped set (based on y_true quantiles)
+#     """
+#     y_true = np.asarray(y_true)
+#     y_pred = np.asarray(y_pred)
+
+#     out = {}
+#     out["full"] = regression_metrics(y_true, y_pred)
+
+#     mask, lo, hi = clipped_mask_by_y_true(y_true, q_low=q_low, q_high=q_high)
+#     out["clipped"] = regression_metrics(y_true[mask], y_pred[mask])
+#     out["clipped"]["clip_q_low"] = float(q_low)
+#     out["clipped"]["clip_q_high"] = float(q_high)
+#     out["clipped"]["clip_lo"] = lo
+#     out["clipped"]["clip_hi"] = hi
+#     return out
+
+def metrics_full_and_clipped(y_true, y_pred, q_low=0.01, q_high=0.99,
+                              clip_lo=None, clip_hi=None) -> dict:
     y_true = np.asarray(y_true)
     y_pred = np.asarray(y_pred)
 
     out = {}
     out["full"] = regression_metrics(y_true, y_pred)
 
-    mask, lo, hi = clipped_mask_by_y_true(y_true, q_low=q_low, q_high=q_high)
+    # Use provided bounds, or fall back to computing from y_true
+    if clip_lo is None or clip_hi is None:
+        lo, hi = np.quantile(y_true, [q_low, q_high])
+    else:
+        lo, hi = clip_lo, clip_hi
+
+    mask = (y_true >= lo) & (y_true <= hi)
     out["clipped"] = regression_metrics(y_true[mask], y_pred[mask])
     out["clipped"]["clip_q_low"] = float(q_low)
     out["clipped"]["clip_q_high"] = float(q_high)
-    out["clipped"]["clip_lo"] = lo
-    out["clipped"]["clip_hi"] = hi
+    out["clipped"]["clip_lo"] = float(lo)
+    out["clipped"]["clip_hi"] = float(hi)
     return out
 
 def metrics_to_df(metrics_dict, model_name: str) -> pd.DataFrame:
@@ -1346,7 +1404,9 @@ else:
     ridge_pred_test = np.expm1(ridge_pred_log_test)
     ridge_true_test = np.expm1(y_test)
 
-    ridge_m = metrics_full_and_clipped(ridge_true_test, ridge_pred_test, q_low=0.01, q_high=0.99)
+    # ridge_m = metrics_full_and_clipped(ridge_true_test, ridge_pred_test, q_low=0.01, q_high=0.99)
+
+    ridge_m = metrics_full_and_clipped(ridge_true_test, ridge_pred_test, clip_lo=CLIP_LO, clip_hi=CLIP_HI)
     print(f"RIDGE TEST RMSE ($): {ridge_m['full']['rmse']:,.0f}")
 
     display(metrics_to_df(ridge_m, "Ridge (Test)"))
@@ -1398,7 +1458,9 @@ else:
     ridge_pred_trainval = np.expm1(ridge_pred_trainval_log)
     ridge_true_trainval = np.expm1(y_trainval)
 
-    ridge_tv = metrics_full_and_clipped(ridge_true_trainval, ridge_pred_trainval, q_low=0.01, q_high=0.99)
+    # ridge_tv = metrics_full_and_clipped(ridge_true_trainval, ridge_pred_trainval, q_low=0.01, q_high=0.99)
+
+    ridge_tv = metrics_full_and_clipped(ridge_true_trainval, ridge_pred_trainval, clip_lo=CLIP_LO, clip_hi=CLIP_HI)
     display(metrics_to_df(ridge_tv, "Ridge (Train+Val)"))
 
     # Largest abs residuals on Train+Val
@@ -1498,7 +1560,11 @@ def print_catboost_status_global_and_latest_run(catboost_dir: Path):
 
 def get_catboost_training_data(X, y, *, mode="full"):
     """
-    Returns X_train, X_val, X_test, y_train, y_val, y_test
+    Returns X_train_sm, X_val_sm, X_test_sm,
+            y_train_sm, y_val_sm, y_test_sm,
+            cat_cols_cb, param_grid_1, param_grid_2,
+            final_iterations, early_stop, cv1_splits, cv2_splits,
+            refit_on_trainval, refit_iteration_buffer
     using the shared split variables already created earlier in the notebook.
 
     It adjusts smoke/full behavior and returns grids + settings.
@@ -1521,48 +1587,73 @@ def get_catboost_training_data(X, y, *, mode="full"):
         y_test_sm = y_test.loc[X_test_sm.index]
 
         param_grid_1 = {
-            "depth": [6],
-            "learning_rate": [0.1],
+            "depth": [4],
+            "learning_rate": [0.05],
             "l2_leaf_reg": [3],
             "iterations": [200],
         }
+
         param_grid_2 = {
             "iterations": [300],
             "subsample": [1.0],
             "rsm": [1.0],
+            "random_strength": [1.0],
+            "min_data_in_leaf": [1],
+            "bagging_temperature": [0.0],
         }
+
         final_iterations = 800
         early_stop = 50
         cv1_splits = 2
         cv2_splits = 2
 
-        return (X_train_sm, X_val_sm, X_test_sm,
-                y_train_sm, y_val_sm, y_test_sm,
-                cat_cols_cb, param_grid_1, param_grid_2,
-                final_iterations, early_stop, cv1_splits, cv2_splits)
+        refit_on_trainval = True
+        refit_iteration_buffer = 1.05
+
+        return (
+            X_train_sm, X_val_sm, X_test_sm,
+            y_train_sm, y_val_sm, y_test_sm,
+            cat_cols_cb, param_grid_1, param_grid_2,
+            final_iterations, early_stop, cv1_splits, cv2_splits,
+            refit_on_trainval, refit_iteration_buffer,
+        )
 
     else:
-        # full run 
+        # full run
+        # Stage 1: broader structural search
         param_grid_1 = {
-            "depth": [6, 8, 10],
-            "learning_rate": [0.05, 0.1],
-            "l2_leaf_reg": [3, 10],
-            "iterations": [1500],
+            "depth": [4, 5, 6, 7, 8], # selected 8
+            "learning_rate": [0.02, 0.03, 0.05, 0.07], # selected 0.07
+            "l2_leaf_reg": [3, 10, 30], # selected 3
+            "iterations": [2000], 
         }
+
+        # Stage 2: refinement / regularization search around Stage 1 winner
         param_grid_2 = {
-            "iterations": [2000],
-            "subsample": [0.8, 1.0],
-            "rsm": [0.8, 1.0],
+            "iterations": [3000], 
+            "subsample": [0.85, 1.0], # selected 1.0
+            "rsm": [0.85, 1.0], # selected 0.85
+            "random_strength": [1.0, 2.0], # selected 2.0
+            "min_data_in_leaf": [1, 5], # selected 1
+            "bagging_temperature": [0.0, 1.0], # selected 0.0
         }
-        final_iterations = 5000
-        early_stop = 300
+
+        final_iterations = 8000
+        early_stop = 400
         cv1_splits = 3
         cv2_splits = 2
 
-        return (X_train, X_val, X_test,
-                y_train, y_val, y_test,
-                cat_cols_cb, param_grid_1, param_grid_2,
-                final_iterations, early_stop, cv1_splits, cv2_splits)
+        # After best_iteration is found using VAL, optionally refit on train+val
+        refit_on_trainval = True
+        refit_iteration_buffer = 1.05
+
+        return (
+            X_train, X_val, X_test,
+            y_train, y_val, y_test,
+            cat_cols_cb, param_grid_1, param_grid_2,
+            final_iterations, early_stop, cv1_splits, cv2_splits,
+            refit_on_trainval, refit_iteration_buffer,
+        )
 ```
 
 ```{python}
@@ -1594,7 +1685,6 @@ def _stage_paths(run_dir: Path, stage: str):
 
 #### Catboost Training
 ```{python}
-
 print_catboost_status_global_and_latest_run(CATBOOST_DIR)
 
 # ==========================================================
@@ -1602,7 +1692,7 @@ print_catboost_status_global_and_latest_run(CATBOOST_DIR)
 # ==========================================================
 
 final_cb = None
-RUN_DIR = None 
+RUN_DIR = None
 
 # ---------------------------
 # Global "skip" mode
@@ -1636,10 +1726,13 @@ else:
             print("Training CatBoost (no final checkpoint found).")
 
         # Prepare data + mode-specific settings
-        (X_train_cb, X_val_cb, X_test_cb,
-         y_train_cb, y_val_cb, y_test_cb,
-         cat_cols_cb, param_grid_1, param_grid_2,
-         final_iterations, early_stop, cv1_splits, cv2_splits) = get_catboost_training_data(X, y, mode=TRAIN_MODE)
+        (
+            X_train_cb, X_val_cb, X_test_cb,
+            y_train_cb, y_val_cb, y_test_cb,
+            cat_cols_cb, param_grid_1, param_grid_2,
+            final_iterations, early_stop, cv1_splits, cv2_splits,
+            refit_on_trainval, refit_iteration_buffer
+        ) = get_catboost_training_data(X, y, mode=TRAIN_MODE)
 
         print("TRAIN_MODE:", TRAIN_MODE)
         print("CatBoost categorical columns:", cat_cols_cb)
@@ -1665,6 +1758,8 @@ else:
             "stage2_param_grid_base": param_grid_2,
             "final_iterations_cap": int(final_iterations),
             "early_stopping_rounds": int(early_stop),
+            "refit_on_trainval": bool(refit_on_trainval),
+            "refit_iteration_buffer": float(refit_iteration_buffer),
             "updates_latest": bool(should_update_latest(TRAIN_MODE)),
         }
         atomic_write_json(RUN_DIR / "run_info.json", run_info)
@@ -1720,7 +1815,7 @@ else:
                     param_grid=param_grid_1,
                     scoring="neg_root_mean_squared_error",
                     cv=cv1,
-                    n_jobs=1,   
+                    n_jobs=1,
                     verbose=2
                 )
 
@@ -1816,19 +1911,23 @@ else:
                     clear_file(STAGE2_INPROGRESS)
 
         # -------------------------
-        # Stage 3: final refit + early stopping on VAL
+        # Stage 3: final fit on TRAIN with VAL early stopping
+        #          then optional refit on TRAIN+VAL
         # -------------------------
-        print("🏁 Stage 3: final refit with early stopping (VAL)")
+        print("🏁 Stage 3: final fit with early stopping on VAL")
         mark_in_progress(sf["inprog"], "final refit started")
 
         if TOUCH_GLOBAL:
             mark_in_progress(FINAL_INPROGRESS, "final refit started (global)")
 
         try:
+            # --------------------------------------------
+            # 3A) Fit on TRAIN, early stop on VAL
+            # --------------------------------------------
             final_params = best2.copy()
             final_params["iterations"] = final_iterations  # cap; early stopping decides
 
-            final_cb = CatBoostRegressor(
+            cb_train_val = CatBoostRegressor(
                 **final_params,
                 loss_function="RMSE",
                 random_seed=42,
@@ -1836,28 +1935,111 @@ else:
                 allow_writing_files=False
             )
 
-            final_cb.fit(
+            cb_train_val.fit(
                 X_train_cb, y_train_cb,
                 cat_features=cat_cols_cb,
-                eval_set=(X_val_cb, y_val_cb),         
+                eval_set=(X_val_cb, y_val_cb),
                 early_stopping_rounds=early_stop,
                 use_best_model=True
             )
 
-            assert final_cb.is_fitted(), "CatBoost model not fitted; refusing to save."
-            
-            print("Best iteration:", final_cb.get_best_iteration())
+            assert cb_train_val.is_fitted(), "CatBoost train/val model not fitted; refusing to continue."
 
-            # Save feature columns
+            best_iteration_raw = cb_train_val.get_best_iteration()
+            if best_iteration_raw is None or int(best_iteration_raw) < 0:
+                best_iteration_raw = final_iterations
+
+            best_iteration = int(best_iteration_raw)
+            print("Best iteration from TRAIN/VAL fit:", best_iteration)
+
+            # --------------------------------------------
+            # 3B) Optional refit on TRAIN+VAL
+            # --------------------------------------------
+            refit_meta = {
+                "did_refit_on_trainval": False,
+                "best_iteration_from_train_val_fit": int(best_iteration),
+                "refit_iteration_buffer": float(refit_iteration_buffer),
+                "refit_iterations_used": int(best_iteration),
+            }
+
+            if refit_on_trainval:
+                print("🔁 Refit enabled: training final CatBoost on TRAIN+VAL")
+
+                X_trainval_cb = pd.concat([X_train_cb, X_val_cb], axis=0)
+                y_trainval_cb = pd.concat([y_train_cb, y_val_cb], axis=0)
+
+                refit_iterations = max(
+                    1,
+                    int(np.ceil(best_iteration * float(refit_iteration_buffer)))
+                )
+                refit_iterations = min(refit_iterations, int(final_iterations))
+
+                refit_params = best2.copy()
+                refit_params["iterations"] = refit_iterations
+
+                final_cb = CatBoostRegressor(
+                    **refit_params,
+                    loss_function="RMSE",
+                    random_seed=42,
+                    verbose=200,
+                    allow_writing_files=False
+                )
+
+                final_cb.fit(
+                    X_trainval_cb, y_trainval_cb,
+                    cat_features=cat_cols_cb
+                )
+
+                assert final_cb.is_fitted(), "CatBoost refit model not fitted; refusing to save."
+
+                refit_meta = {
+                    "did_refit_on_trainval": True,
+                    "best_iteration_from_train_val_fit": int(best_iteration),
+                    "refit_iteration_buffer": float(refit_iteration_buffer),
+                    "refit_iterations_used": int(refit_iterations),
+                }
+
+                print("✅ Refit complete on TRAIN+VAL")
+                print("Refit iterations used:", refit_iterations)
+
+            else:
+                print("ℹ️ Refit disabled — using TRAIN/VAL early-stopped model as final model.")
+                final_cb = cb_train_val
+
+                refit_meta = {
+                    "did_refit_on_trainval": False,
+                    "best_iteration_from_train_val_fit": int(best_iteration),
+                    "refit_iteration_buffer": float(refit_iteration_buffer),
+                    "refit_iterations_used": int(best_iteration),
+                }
+
+            cb_best_iteration_from_train_val_fit = int(refit_meta["best_iteration_from_train_val_fit"])
+            cb_refit_on_trainval_used = bool(refit_meta["did_refit_on_trainval"])
+            cb_refit_iterations_used = int(refit_meta["refit_iterations_used"])
+
+            # --------------------------------------------
+            # 3C) Save metadata + artifacts
+            # --------------------------------------------
+            final_params_to_save = dict(best2)
+            final_params_to_save["iterations"] = int(refit_meta["refit_iterations_used"])
+
+            final_training_summary = {
+                "base_best2_params": best2,
+                "train_val_fit_iterations_cap": int(final_iterations),
+                "early_stopping_rounds": int(early_stop),
+                **refit_meta,
+            }
+
             atomic_write_json(RUN_DIR / "feature_columns.json", list(X_train_cb.columns))
             if TOUCH_GLOBAL:
                 atomic_write_json(FEATURE_COLS_PATH, list(X_train_cb.columns))
 
-            # Save params
-            atomic_write_json(sf["params"], final_params)           
-            atomic_write_json(RUN_DIR / "final_params.json", final_params)  
+            atomic_write_json(sf["params"], final_params_to_save)
+            atomic_write_json(RUN_DIR / "final_params.json", final_params_to_save)
+            atomic_write_json(RUN_DIR / "final_training_summary.json", final_training_summary)
+
             if TOUCH_GLOBAL:
-                atomic_write_json(FINAL_PARAMS_PATH, final_params)
+                atomic_write_json(FINAL_PARAMS_PATH, final_params_to_save)
 
             # Save model versioned always
             versioned_model_path = RUN_DIR / "catboost_final.cbm"
@@ -1895,22 +2077,49 @@ if final_cb is None:
     print("⚠️ CatBoost model not available — skipping evaluation.")
 else:
     # ----------------------------
+    # Report final training metadata
+    # ----------------------------
+    cb_refit_used = bool(globals().get("cb_refit_on_trainval_used", False))
+    cb_best_iter_tv = globals().get("cb_best_iteration_from_train_val_fit", None)
+    cb_refit_iters = globals().get("cb_refit_iterations_used", None)
+
+    if cb_best_iter_tv is not None:
+        print("Best iteration from TRAIN/VAL fit:", cb_best_iter_tv)
+
+    if cb_refit_used:
+        print("Final CatBoost model was refit on TRAIN+VAL.")
+        if cb_refit_iters is not None:
+            print("Refit iterations used:", cb_refit_iters)
+    else:
+        print("Final CatBoost model is the TRAIN-only model with VAL early stopping.")
+
+    # ----------------------------
     # TRAIN split metrics
     # ----------------------------
     cb_pred_train = np.expm1(final_cb.predict(X_train))
     cb_true_train = np.expm1(y_train)
 
-    cb_tr = metrics_full_and_clipped(cb_true_train, cb_pred_train, q_low=0.01, q_high=0.99)
+    # cb_tr = metrics_full_and_clipped(cb_true_train, cb_pred_train, q_low=0.01, q_high=0.99)
+
+    cb_tr = metrics_full_and_clipped(cb_true_train, cb_pred_train, clip_lo=CLIP_LO, clip_hi=CLIP_HI)
     display(metrics_to_df(cb_tr, "CatBoost (Train)"))
 
     # ----------------------------
-    # VAL split metrics (early-stopping set)
+    # VAL split metrics
+    # If final model was refit on TRAIN+VAL, this is no longer an untouched
+    # early-stopping set; it is just a diagnostic slice of the final model.
     # ----------------------------
     cb_pred_val = np.expm1(final_cb.predict(X_val))
     cb_true_val = np.expm1(y_val)
 
-    cb_v = metrics_full_and_clipped(cb_true_val, cb_pred_val, q_low=0.01, q_high=0.99)
-    display(metrics_to_df(cb_v, "CatBoost (Val)"))
+    # cb_v = metrics_full_and_clipped(cb_true_val, cb_pred_val, q_low=0.01, q_high=0.99)
+
+    cb_v = metrics_full_and_clipped(cb_true_val, cb_pred_val, clip_lo=CLIP_LO, clip_hi=CLIP_HI)
+
+    if cb_refit_used:
+        display(metrics_to_df(cb_v, "CatBoost (Val Diagnostic)"))
+    else:
+        display(metrics_to_df(cb_v, "CatBoost (Val)"))
 
     # ----------------------------
     # TEST split metrics
@@ -1918,9 +2127,9 @@ else:
     cb_pred_test = np.expm1(final_cb.predict(X_test))
     cb_true_test = np.expm1(y_test)
 
-    print("Best iteration:", final_cb.get_best_iteration())
+    # cb_m = metrics_full_and_clipped(cb_true_test, cb_pred_test, q_low=0.01, q_high=0.99)
 
-    cb_m = metrics_full_and_clipped(cb_true_test, cb_pred_test, q_low=0.01, q_high=0.99)
+    cb_m = metrics_full_and_clipped(cb_true_test, cb_pred_test, clip_lo=CLIP_LO, clip_hi=CLIP_HI)
     print(f"CATBOOST TEST RMSE ($): {cb_m['full']['rmse']:,.0f}")
 
     display(metrics_to_df(cb_m, "CatBoost (Test)"))
@@ -1934,20 +2143,35 @@ else:
     cb_pred_trainval = np.expm1(final_cb.predict(X_trainval_cb))
     cb_true_trainval = np.expm1(y_trainval_cb)
 
-    cb_tv = metrics_full_and_clipped(cb_true_trainval, cb_pred_trainval, q_low=0.01, q_high=0.99)
+    # cb_tv = metrics_full_and_clipped(cb_true_trainval, cb_pred_trainval, q_low=0.01, q_high=0.99)
+
+    cb_tv = metrics_full_and_clipped(cb_true_trainval, cb_pred_trainval, clip_lo=CLIP_LO, clip_hi=CLIP_HI)
     display(metrics_to_df(cb_tv, "CatBoost (Train+Val)"))
 
     # ----------------------------
     # Feature Importance
     # ----------------------------
+    feature_names_cb = None
+
+    feature_cols_path_eval = RUN_DIR / "feature_columns.json" if RUN_DIR is not None else None
+    if feature_cols_path_eval is not None and feature_cols_path_eval.exists():
+        feature_names_cb = json.loads(feature_cols_path_eval.read_text())
+    elif FEATURE_COLS_PATH.exists():
+        feature_names_cb = json.loads(FEATURE_COLS_PATH.read_text())
+    else:
+        feature_names_cb = list(X_train.columns)
+
     importances = final_cb.get_feature_importance()
     fi = (
-        pd.DataFrame({"feature": X_train.columns, "importance": importances})
+        pd.DataFrame({"feature": feature_names_cb, "importance": importances})
         .sort_values("importance", ascending=False)
+        .reset_index(drop=True)
     )
     display(fi.head(25))
 
-    # Globals for metrics writer (clipped + full)
+    # ----------------------------
+    # Globals for metrics writer
+    # ----------------------------
     cb_test_full = cb_m["full"]
     cb_test_clipped = cb_m["clipped"]
 
@@ -2857,7 +3081,7 @@ class FTHyperModel(kt.HyperModel):
             val_y,
             batch_size=batch_eff,
             training=False,
-            drop_remainder=True,
+            drop_remainder=False,
         )
 
         patience = int(TUNER_PATIENCE_SMOKE if self.mode == "smoke" else TUNER_PATIENCE_FULL)
@@ -2890,7 +3114,7 @@ def run_tuner_for_mode(mode: str):
 
     if (TUNE_WHEN == "smoke" and mode != "smoke") or (TUNE_WHEN == "full" and mode != "full"):
         return None
-    if (TUNE_WHEN == "both") is False and (TUNE_WHEN not in ("smoke", "full")):
+    if TUNE_WHEN not in ("smoke", "full", "both"):
         return None
 
     # Use the exact run data this mode will use
@@ -3320,7 +3544,7 @@ else:
         y_val_run,
         batch_size=batch_eff,
         training=False,
-        drop_remainder=True,
+        drop_remainder=False,
     )
 
     history = model.fit(
@@ -3378,6 +3602,20 @@ else:
             base_dir=KERAS_EVAL_ARTIFACT_DIR,
             kind=KERAS_EVAL_ARTIFACT_KIND,
         )
+        # ⚠️ GLOBAL STATE NOTE:
+        # _rebuild_and_load_keras_model_from_artifacts temporarily swaps FT_CFG,
+        # num_cols_nn, cat_cols_nn, and LOOKUP_VOCABS to rebuild the model architecture,
+        # then restores them in a finally block. This means model_eval was *built* with
+        # the saved artifact's config, but the current globals reflect the notebook's
+        # live config — which may differ (e.g. after tuning or code edits).
+        
+        # Any code using model_eval must pull feature names, vocab, and normalization
+        # stats from eval_art (the returned artifact dict), NOT from the live globals.
+        #
+        # ✅ Correct:  eval_art["num_cols"], eval_art["cat_cols"], eval_art["lookup_vocabs"]
+        # ❌ Wrong:    num_cols_nn, cat_cols_nn, LOOKUP_VOCABS (live globals, may not match model_eval)
+        
+        # The permutation importance section below follows the correct pattern.
 
         if KERAS_MODEL_SOURCE == "trained_this_run":
             test_inputs_tf_eval = test_inputs_tf
@@ -3435,13 +3673,17 @@ else:
     true_test = np.expm1(y_test_nn.astype("float64"))
     pred_test = predict_dollars(test_inputs_tf_eval)
 
-    keras_test_m = metrics_full_and_clipped(true_test, pred_test, q_low=0.01, q_high=0.99)
+    # keras_test_m = metrics_full_and_clipped(true_test, pred_test, q_low=0.01, q_high=0.99)
+
+    keras_test_m = metrics_full_and_clipped(true_test, pred_test, clip_lo=CLIP_LO, clip_hi=CLIP_HI)
     display(metrics_to_df(keras_test_m, "FT-Transformer (Test)"))
 
     true_trainval = np.expm1(y_trainval_eval.astype("float64"))
     pred_trainval = predict_dollars(trainval_inputs_tf_eval)
 
-    keras_trainval_m = metrics_full_and_clipped(true_trainval, pred_trainval, q_low=0.01, q_high=0.99)
+    # keras_trainval_m = metrics_full_and_clipped(true_trainval, pred_trainval, q_low=0.01, q_high=0.99)
+
+    keras_trainval_m = metrics_full_and_clipped(true_trainval, pred_trainval, clip_lo=CLIP_LO, clip_hi=CLIP_HI)
     display(metrics_to_df(keras_trainval_m, "FT-Transformer (Train+Val)"))
 
     print(true_trainval.shape, pred_trainval.shape, true_test.shape, pred_test.shape)
@@ -3783,8 +4025,10 @@ def _split_payload(full_key: str, clipped_key: str):
 #   ridge_test_full, ridge_test_clipped
 #   ridge_trainval_full, ridge_trainval_clipped
 # -------------------------
-if all(k in globals() for k in ["ridge_test_full", "ridge_test_clipped",
-                                "ridge_trainval_full", "ridge_trainval_clipped"]):
+if all(k in globals() for k in [
+    "ridge_test_full", "ridge_test_clipped",
+    "ridge_trainval_full", "ridge_trainval_clipped"
+]):
     metrics["ridge"] = {
         "trainval": _split_payload("ridge_trainval_full", "ridge_trainval_clipped"),
         "test": _split_payload("ridge_test_full", "ridge_test_clipped"),
@@ -3798,17 +4042,33 @@ else:
 #   cb_test_full, cb_test_clipped
 #   cb_trainval_full, cb_trainval_clipped
 #   cb_train_full/cb_train_clipped, cb_val_full/cb_val_clipped
+#   cb_best_iteration_from_train_val_fit, cb_refit_on_trainval_used, cb_refit_iterations_used
 # -------------------------
-if all(k in globals() for k in ["cb_test_full", "cb_test_clipped",
-                                "cb_trainval_full", "cb_trainval_clipped"]):
+if all(k in globals() for k in [
+    "cb_test_full", "cb_test_clipped",
+    "cb_trainval_full", "cb_trainval_clipped"
+]):
     metrics["catboost"] = {
         "trainval": _split_payload("cb_trainval_full", "cb_trainval_clipped"),
         "test": _split_payload("cb_test_full", "cb_test_clipped"),
-        "best_iteration": (
-            int(final_cb.get_best_iteration())
-            if ("final_cb" in globals() and final_cb is not None)
+
+        # Updated metadata for refit-aware CatBoost workflow
+        "best_iteration_train_val_fit": (
+            int(cb_best_iteration_from_train_val_fit)
+            if "cb_best_iteration_from_train_val_fit" in globals()
             else None
         ),
+        "refit_on_trainval": (
+            bool(cb_refit_on_trainval_used)
+            if "cb_refit_on_trainval_used" in globals()
+            else None
+        ),
+        "refit_iterations_used": (
+            int(cb_refit_iterations_used)
+            if "cb_refit_iterations_used" in globals()
+            else None
+        ),
+
         "run_dir": _str_or_none(globals().get("RUN_DIR", None)),
     }
 
@@ -3835,8 +4095,10 @@ else:
 #   keras_test_full, keras_test_clipped
 #   keras_trainval_full, keras_trainval_clipped
 # -------------------------
-if all(k in globals() for k in ["keras_test_full", "keras_test_clipped",
-                                "keras_trainval_full", "keras_trainval_clipped"]):
+if all(k in globals() for k in [
+    "keras_test_full", "keras_test_clipped",
+    "keras_trainval_full", "keras_trainval_clipped"
+]):
     metrics["keras"] = {
         "trainval": _split_payload("keras_trainval_full", "keras_trainval_clipped"),
         "test": _split_payload("keras_test_full", "keras_test_clipped"),
@@ -3870,7 +4132,6 @@ if ("KERAS_RUN_DIR" in globals()) and (globals().get("KERAS_RUN_DIR", None) is n
     }
     atomic_write_json(globals()["KERAS_RUN_DIR"] / "keras_metrics.json", keras_only)
     print("🧾 Wrote Keras-only metrics:", globals()["KERAS_RUN_DIR"] / "keras_metrics.json")
-
 ```
 
 ## Model Comparison Graphs
@@ -4071,15 +4332,11 @@ else:
     else:
         print("ℹ️ CatBoost not available — skipping CatBoost plots.")
 
-    if ("model" in globals()) and (model is not None) and (("test_inputs_tf" in globals()) or ("test_inputs" in globals())):
-
-        if ("test_inputs_tf" in globals()) and (test_inputs_tf is not None):
-            preds["Keras"] = predict_dollars(test_inputs_tf)
-        else:
-            preds["Keras"] = predict_dollars(test_inputs)
+    # Use evaluation-ready Keras objects if available
+    if ("model_eval" in globals()) and (model_eval is not None) and ("test_inputs_tf_eval" in globals()):
+        preds["Keras"] = predict_dollars(test_inputs_tf_eval)
     else:
-        print("ℹ️ Keras model/test_inputs not available — skipping Keras plots.")
-
+        print("ℹ️ Keras evaluation model/inputs not available — skipping Keras plots.")
 
     if len(preds) == 0:
         print("⚠️ No model predictions available — nothing to plot.")
