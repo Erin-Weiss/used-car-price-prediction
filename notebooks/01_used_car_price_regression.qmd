@@ -250,7 +250,7 @@ Additional metadata files (such as `ridge_run_info.json` and `catboost_run_info.
 
 ### Project Setup
 
-The setup cell loads all dependencies, defines project paths, configures training control flags, and includes a Kaggle CLI download helper that automatically fetches the raw dataset if it's not already present locally. All artifact paths follow the versioning system described in the folder structure above.
+The setup cell loads all dependencies, defines project paths, configures training control flags, and includes a Kaggle CLI download helper that automatically fetches the raw dataset if it's not already present locally. All artifact paths follow the versioning system described in the folder structure above. The project root is also added to the Python path so modules in `src/` can be imported.
 ```{python}
 #| code-summary: "Libraries, paths, training flags, Kaggle download helper, and artifact utilities"
 # ===============================
@@ -681,7 +681,6 @@ def assert_saved_schema_matches(
         )
 ```
 
-Adds the project root to the Python path so modules in `src/` can be imported if needed.
 ```{python}
 #| echo: false
 # Make project root importable (so src/ can be imported if/when you want)
@@ -910,7 +909,7 @@ def build_features_df(df_cleaned: pd.DataFrame) -> pd.DataFrame:
     return features_df
 '''
 
-PIPELINE_PY.write_text(pipeline_code, encoding="utf-8")
+PIPELINE_PY.write_text(pipeline_code, encoding="utf-8");
 # Commented out for notebook render
 # print("✅ Wrote:", PIPELINE_PY)
 ```
@@ -1802,9 +1801,8 @@ else:
     ridge_true_test = np.expm1(y_test)
 
     ridge_m = metrics_full_and_clipped(ridge_true_test, ridge_pred_test, clip_lo=CLIP_LO, clip_hi=CLIP_HI)
-    print(f"RIDGE TEST RMSE ($): {ridge_m['full']['rmse']:,.0f}")
 
-    display(metrics_to_df(ridge_m, "Ridge (Test)"))
+    print(f"RIDGE TEST RMSE ($): {ridge_m['full']['rmse']:,.0f}")
 
     # Feature count
     try:
@@ -1816,32 +1814,7 @@ else:
     except Exception as e:
         print("⚠️ Could not compute one-hot feature count:", e)
 
-    # ----------------------------
-    # Plots (TEST, unclipped)
-    # ----------------------------
-    plt.figure(figsize=(6, 6))
-    plt.scatter(ridge_true_test, ridge_pred_test, alpha=0.2)
-    plt.plot(
-        [ridge_true_test.min(), ridge_true_test.max()],
-        [ridge_true_test.min(), ridge_true_test.max()],
-        "r--"
-    )
-    plt.xlabel("Actual Price ($)")
-    plt.ylabel("Predicted Price ($)")
-    plt.title("Predicted vs Actual Price (Ridge, Test Set)")
-    plt.tight_layout()
-    plt.show()
-
-    ridge_residuals_test = ridge_true_test - ridge_pred_test
-
-    plt.figure(figsize=(6, 4))
-    plt.scatter(ridge_pred_test, ridge_residuals_test, alpha=0.2)
-    plt.axhline(0, color="red", linestyle="--")
-    plt.xlabel("Predicted Price ($)")
-    plt.ylabel("Residual ($)")
-    plt.title("Residuals vs Predicted Price (Ridge, Test Set)")
-    plt.tight_layout()
-    plt.show()
+    display(metrics_to_df(ridge_m, "Ridge (Test)"))
 
     # ----------------------------
     # TRAIN+VAL metrics
@@ -1857,6 +1830,10 @@ else:
     display(metrics_to_df(ridge_tv, "Ridge (Train+Val)"))
 
     # Largest abs residuals on Train+Val
+    # These rare ultra-high-value vehicles explain why full-distribution
+    # RMSE is much larger than clipped RMSE — a handful of $500k+ cars
+    # dominate the error metric.
+    print("Largest absolute residuals (Train+Val):")
     ridge_residuals_trainval = ridge_true_trainval - ridge_pred_trainval
     ridge_outliers_trainval = (
         pd.DataFrame({
@@ -2559,6 +2536,17 @@ else:
         print("Final CatBoost model is the TRAIN-only model with VAL early stopping.")
 
     # ----------------------------
+    # TEST split metrics
+    # ----------------------------
+    cb_pred_test = np.expm1(final_cb.predict(X_test))
+    cb_true_test = np.expm1(y_test)
+
+    cb_m = metrics_full_and_clipped(cb_true_test, cb_pred_test, clip_lo=CLIP_LO, clip_hi=CLIP_HI)
+    print(f"CATBOOST TEST RMSE ($): {cb_m['full']['rmse']:,.0f}")
+
+    display(metrics_to_df(cb_m, "CatBoost (Test)"))
+
+    # ----------------------------
     # TRAIN split metrics
     # ----------------------------
     cb_pred_train = np.expm1(final_cb.predict(X_train))
@@ -2581,17 +2569,6 @@ else:
         display(metrics_to_df(cb_v, "CatBoost (Val Diagnostic)"))
     else:
         display(metrics_to_df(cb_v, "CatBoost (Val)"))
-
-    # ----------------------------
-    # TEST split metrics
-    # ----------------------------
-    cb_pred_test = np.expm1(final_cb.predict(X_test))
-    cb_true_test = np.expm1(y_test)
-
-    cb_m = metrics_full_and_clipped(cb_true_test, cb_pred_test, clip_lo=CLIP_LO, clip_hi=CLIP_HI)
-    print(f"CATBOOST TEST RMSE ($): {cb_m['full']['rmse']:,.0f}")
-
-    display(metrics_to_df(cb_m, "CatBoost (Test)"))
 
     # ----------------------------
     # Train+Val metrics for comparison
@@ -4182,8 +4159,6 @@ else:
     keras_trainval_m = metrics_full_and_clipped(true_trainval, pred_trainval, clip_lo=CLIP_LO, clip_hi=CLIP_HI)
     display(metrics_to_df(keras_trainval_m, "FT-Transformer (Train+Val)"))
 
-    print(true_trainval.shape, pred_trainval.shape, true_test.shape, pred_test.shape)
-
     # ----------------------------
     # Globals for metrics writer
     # ----------------------------
@@ -4419,8 +4394,6 @@ else:
             max_rows=10000,
             include_categoricals=True,
         )
-
-        print(f"Baseline TEST RMSE ($) [subset for PI]: {base_rmse_pi:,.0f}")
 
         pi_df_display = pi_df.copy()
 
