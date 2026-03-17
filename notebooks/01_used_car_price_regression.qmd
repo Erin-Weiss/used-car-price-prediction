@@ -46,7 +46,7 @@ This progression allows direct comparison between classical ML and deep learning
 
 | Metric | Ridge | CatBoost | FT-Transformer |
 |---|---|---|---|
-| **Test RMSE (full)** | $7,827 | **$3,940** | $4,196 |
+| **Test RMSE (full)** | $7,827 | **$3,940** | $4,193 |
 | **Test MAE (full)** | $3,013 | **$1,912** | $1,928 |
 | **Test MedianAE (full)** | $1,758 | **$1,278** | $1,302 |
 | Test RMSE (clipped 1–99%) | $4,214 | **$2,659** | $2,691 |
@@ -598,6 +598,9 @@ KERAS_LATEST_RUN_INFO_PATH = KERAS_DIR / "keras_run_info.json"
 KERAS_LATEST_TRAIN_MEDIANS_PATH = KERAS_DIR / "keras_train_medians.json"
 KERAS_LATEST_NUM_NORM_STATS_PATH = KERAS_DIR / "keras_num_norm_stats.json"
 KERAS_LATEST_LOOKUP_VOCABS_PATH = KERAS_DIR / "keras_lookup_vocabs.json"
+KERAS_LATEST_HISTORY_PATH = KERAS_DIR / "keras_history.json"
+KERAS_LATEST_LOSS_PLOT_PATH = KERAS_DIR / "keras_training_loss.png"
+KERAS_LATEST_RMSE_PLOT_PATH = KERAS_DIR / "keras_training_rmse.png"
 
 # ----------------------------
 # Metrics artifact paths
@@ -3711,7 +3714,11 @@ def _keras_artifact_paths(base_dir: Path, kind: str) -> dict:
             "train_medians": KERAS_LATEST_TRAIN_MEDIANS_PATH,
             "num_norm_stats": KERAS_LATEST_NUM_NORM_STATS_PATH,
             "lookup_vocabs": KERAS_LATEST_LOOKUP_VOCABS_PATH,
+            "history": KERAS_LATEST_HISTORY_PATH,
+            "loss_plot": KERAS_LATEST_LOSS_PLOT_PATH,
+            "rmse_plot": KERAS_LATEST_RMSE_PLOT_PATH,
         }
+
     elif kind == "run":
         return {
             "weights": base_dir / "keras_model.weights.h5",
@@ -3719,7 +3726,11 @@ def _keras_artifact_paths(base_dir: Path, kind: str) -> dict:
             "train_medians": base_dir / "train_medians.json",
             "num_norm_stats": base_dir / "num_norm_stats.json",
             "lookup_vocabs": base_dir / "lookup_vocabs.json",
+            "history": base_dir / "keras_history.json",
+            "loss_plot": base_dir / "keras_training_loss.png",
+            "rmse_plot": base_dir / "keras_training_rmse.png",
         }
+
     else:
         raise ValueError(f"Unknown Keras artifact kind: {kind}")
 
@@ -3885,6 +3896,91 @@ def _rebuild_and_load_keras_model_from_artifacts(*, base_dir: Path, kind: str):
 
 print("FT-Transformer SHOULD_TRAIN_KERAS =", SHOULD_TRAIN_KERAS, "| latest exists =", _keras_latest_exists())
 
+def _history_to_serializable_dict(history_obj) -> dict:
+    """
+    Convert a Keras History object (or dict-like history) into plain Python
+    lists/floats so it can be safely written to JSON.
+    """
+    if history_obj is None:
+        return {}
+
+    hist = history_obj.history if hasattr(history_obj, "history") else dict(history_obj)
+
+    out = {}
+    for k, v in hist.items():
+        if v is None:
+            out[k] = []
+        else:
+            out[k] = [float(x) for x in v]
+    return out
+
+
+def _save_keras_history(history_obj, history_path: Path):
+    hist = _history_to_serializable_dict(history_obj)
+    atomic_write_json(history_path, hist)
+
+
+def _load_keras_history(history_path: Path) -> dict | None:
+    if not history_path.exists():
+        return None
+    data = json.loads(history_path.read_text())
+    if not isinstance(data, dict):
+        return None
+    return data
+
+def plot_keras_training_curves(
+    hist: dict,
+    *,
+    show: bool = True,
+    loss_plot_path: Path | None = None,
+    rmse_plot_path: Path | None = None,
+):
+    if not hist:
+        return
+
+    has_loss = ("loss" in hist) or ("val_loss" in hist)
+    has_rmse = ("rmse_dollars" in hist) or ("val_rmse_dollars" in hist)
+
+    if has_loss:
+        plt.figure(figsize=(7, 4))
+        if "loss" in hist:
+            plt.plot(hist["loss"], label="loss")
+        if "val_loss" in hist:
+            plt.plot(hist["val_loss"], label="val_loss")
+        plt.xlabel("Epoch")
+        plt.ylabel("Loss (log space)")
+        plt.title("FT-Transformer Training Curves (Loss)")
+        plt.legend()
+        plt.tight_layout()
+
+        if loss_plot_path is not None:
+            plt.savefig(loss_plot_path, dpi=160, bbox_inches="tight")
+
+        if show:
+            plt.show()
+        else:
+            plt.close()
+
+    if has_rmse:
+        plt.figure(figsize=(7, 4))
+        if "rmse_dollars" in hist:
+            plt.plot(hist["rmse_dollars"], label="rmse_dollars")
+        if "val_rmse_dollars" in hist:
+            plt.plot(hist["val_rmse_dollars"], label="val_rmse_dollars")
+        plt.xlabel("Epoch")
+        plt.ylabel("RMSE ($)")
+        plt.title("FT-Transformer Training Curves (RMSE $)")
+        plt.legend()
+        plt.tight_layout()
+
+        if rmse_plot_path is not None:
+            plt.savefig(rmse_plot_path, dpi=160, bbox_inches="tight")
+
+        if show:
+            plt.show()
+        else:
+            plt.close()
+
 # 1) SKIP
 if TRAIN_MODE == "skip":
     if _keras_latest_exists():
@@ -4023,9 +4119,25 @@ else:
         callbacks=make_callbacks(TRAIN_MODE),
     )
 
+    if TRAIN_MODE == "full":
+        run_paths = _keras_artifact_paths(KERAS_RUN_DIR, "run")
+        _save_keras_history(history, run_paths["history"])
+
+        plot_keras_training_curves(
+            _history_to_serializable_dict(history),
+            show=False,
+            loss_plot_path=run_paths["loss_plot"],
+            rmse_plot_path=run_paths["rmse_plot"],
+        )
+
+        # print("💾 Saved Keras training history:", run_paths["history"])
+        # print("💾 Saved Keras training plots:", run_paths["loss_plot"], "and", run_paths["rmse_plot"])
+    else:
+        print("ℹ️ Smoke mode: not saving Keras training history or plots.")
+
     # Save versioned weights only
     model.save_weights(versioned_weights_path)
-    print("💾 Saved versioned weights:", versioned_weights_path)
+    # print("💾 Saved versioned weights:", versioned_weights_path)
 
     # Evaluation should use this run's saved weight/artifact bundle.
     KERAS_EVAL_ARTIFACT_DIR = KERAS_RUN_DIR
@@ -4046,7 +4158,22 @@ else:
             lookup_vocabs=LOOKUP_VOCABS,
         )
 
-        print("✅ Updated latest Keras weights:", KERAS_LATEST_WEIGHTS_PATH)
+        if TRAIN_MODE == "full" and _touches_latest():
+            latest_paths = _keras_artifact_paths(KERAS_DIR, "latest")
+
+            _save_keras_history(history, latest_paths["history"])
+
+            plot_keras_training_curves(
+                _history_to_serializable_dict(history),
+                show=False,
+                loss_plot_path=latest_paths["loss_plot"],
+                rmse_plot_path=latest_paths["rmse_plot"],
+            )
+
+            #print("✅ Updated latest Keras history:", latest_paths["history"])
+            #print("✅ Updated latest Keras plots:", latest_paths["loss_plot"], "and", latest_paths["rmse_plot"])
+
+        #print("✅ Updated latest Keras weights:", KERAS_LATEST_WEIGHTS_PATH)
     else:
         print("🚫 Smoke run: NOT updating latest pointer.")
 ```
@@ -4417,39 +4544,31 @@ else:
     # ----------------------------
     # Training Graphs
     # ----------------------------
+    hist_to_plot = None
+
+    # First choice: in-memory history from this run
     if ("history" in globals()) and (history is not None):
-        hist = history.history if hasattr(history, "history") else {}
-        if ("loss" in hist) or ("val_loss" in hist) or ("rmse_dollars" in hist) or ("val_rmse_dollars" in hist):
-            plt.figure(figsize=(7, 4))
-            if "loss" in hist:
-                plt.plot(hist["loss"], label="loss")
-            if "val_loss" in hist:
-                plt.plot(hist["val_loss"], label="val_loss")
-            plt.xlabel("Epoch")
-            plt.ylabel("Loss (log space)")
-            plt.title("FT-Transformer Training Curves (Loss)")
-            plt.legend()
-            plt.tight_layout()
-            plt.show()
+        hist_to_plot = _history_to_serializable_dict(history)
 
-            if ("rmse_dollars" in hist) or ("val_rmse_dollars" in hist):
-                plt.figure(figsize=(7, 4))
-                if "rmse_dollars" in hist:
-                    plt.plot(hist["rmse_dollars"], label="rmse_dollars")
-                if "val_rmse_dollars" in hist:
-                    plt.plot(hist["val_rmse_dollars"], label="val_rmse_dollars")
-                plt.xlabel("Epoch")
-                plt.ylabel("RMSE ($)")
-                plt.title("FT-Transformer Training Curves (RMSE $)")
-                plt.legend()
-                plt.tight_layout()
-                plt.show()
+    # Fallback: load saved history from whichever artifact bundle is being evaluated
+    elif ("KERAS_EVAL_ARTIFACT_DIR" in globals()) and (KERAS_EVAL_ARTIFACT_DIR is not None):
+        history_path = _keras_artifact_paths(
+            KERAS_EVAL_ARTIFACT_DIR,
+            KERAS_EVAL_ARTIFACT_KIND,
+        )["history"]
+        hist_to_plot = _load_keras_history(history_path)
+
+    # Final fallback: latest history
+    elif KERAS_LATEST_HISTORY_PATH.exists():
+        hist_to_plot = _load_keras_history(KERAS_LATEST_HISTORY_PATH)
+
+    if hist_to_plot:
+        if ("loss" in hist_to_plot) or ("val_loss" in hist_to_plot) or ("rmse_dollars" in hist_to_plot) or ("val_rmse_dollars" in hist_to_plot):
+            plot_keras_training_curves(hist_to_plot, show=True)
         else:
-            print("ℹ️ history exists but does not contain expected keys.")
+            print("ℹ️ History file exists but does not contain expected keys.")
     else:
-        print("ℹ️ No training history available (likely loaded model or training skipped).")
-
-    print("✅ Done: FT-Transformer trained/loaded and evaluated.")
+        print("ℹ️ No training history available (neither in memory nor saved artifacts).")
 ```
 
 #### FT-Transformer Interpretation
@@ -4458,7 +4577,7 @@ The FT-Transformer was included as evidence of advanced experimentation with dee
 
 **Architecture**: The model uses learned embeddings for each categorical feature and a Transformer-style attention mechanism to capture feature interactions. This is a more modern approach than simple dense networks for tabular data.
 
-**Performance**: The FT-Transformer achieved competitive results — its clipped test MAE ($1,803) is within $20 of CatBoost ($1,783), showing that it learned meaningful representations. However, its full-distribution RMSE ($4,196) is ~6% higher than CatBoost's ($3,940), indicating greater sensitivity to rare, high-price vehicles.
+**Performance**: The FT-Transformer achieved competitive results — its clipped test MAE ($1,803) is within $20 of CatBoost ($1,783), showing that it learned meaningful representations. However, its full-distribution RMSE ($4,193) is ~6% higher than CatBoost's ($3,940), indicating greater sensitivity to rare, high-price vehicles.
 
 **Permutation importance**: The permutation-based feature importance largely agrees with CatBoost's rankings — `model` (25.0%), `manufacturer` (14.4%), `mileage` (14.1%), and `age` (12.0%) are the top features. The consistency across model families suggests these are genuinely the most informative features rather than artifacts of a particular algorithm.
 
