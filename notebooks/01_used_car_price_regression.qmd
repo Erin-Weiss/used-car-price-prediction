@@ -10,6 +10,22 @@ format:
     code-fold: true
     code-tools: true
     theme: cosmo
+    # Workaround: "Show/Hide All Code" dropdown click handlers not attached.
+    # Observed on Quarto 1.8.27. Remove if fixed in a future release.
+    include-after-body:
+      - text: |
+          <script>
+          document.addEventListener('click', (e) => {
+            const t = e.target.closest('a, button');
+            if (!t) return;
+            const text = t.textContent.trim();
+            if (text === 'Show All Code') {
+              document.querySelectorAll('details.code-fold').forEach(d => d.open = true);
+            } else if (text === 'Hide All Code') {
+              document.querySelectorAll('details.code-fold').forEach(d => d.open = false);
+            }
+          });
+          </script>
 execute:
   echo: true
   warning: false
@@ -20,27 +36,27 @@ execute:
 
 ### Objective
 
-This project predicts used-car listing prices from structured vehicle attributes using three progressively complex modeling approaches. The goal is not simply to minimize error, but to understand the tradeoffs between interpretability, feature engineering effort, and predictive performance on real-world tabular data.
+This project predicts used-car listing prices from structured vehicle attributes using three increasingly sophisticated modeling approaches. The objective is not only to minimize error but also to examine the balance between interpretability, feature engineering effort, and predictive performance on real-world tabular data.
 
 ::: {.callout-note title="Why This Matters"}
 Used-car pricing is a high-stakes, high-volume problem. Dealerships, online marketplaces, and lenders all need fast, accurate price estimates to set competitive listing prices, flag underpriced inventory for acquisition, detect overpriced listings, and underwrite auto loans. A model that predicts within ~$1,300 of the true price at the median — as CatBoost does here — is accurate enough to automate first-pass pricing, reduce the need for manual appraisals, and surface arbitrage opportunities across a portfolio of thousands of vehicles.
 :::
 
-The final selected model is **CatBoost**, which achieved the best generalization performance across all metrics while also requiring the least hyperparameter sensitivity and producing the most stable predictions across the full price range.
+The final selected model is **CatBoost**, which achieved the best generalization performance across all metrics, required the least hyperparameter tuning, and produced the most stable predictions across the full price range.
 
 ### Dataset
 
-The dataset comes from the Kaggle [Used Cars Dataset](https://www.kaggle.com/datasets/andreinovikov/used-cars-dataset) by andreinovikov, containing ~762k used-car listings with 20 attributes including vehicle specs, seller information, and pricing. After cleaning and restricting to fully observed records, 243,500 listings remained for modeling.
+The dataset comes from the Kaggle [Used Cars Dataset](https://www.kaggle.com/datasets/andreinovikov/used-cars-dataset) by andreinovikov, containing ~762k used-car listings with 20 attributes, including vehicle specs, seller information, and pricing. After cleaning and restricting to fully observed records, 243,500 listings remained for modeling.
 
 ### Modeling Strategy
 
 Three models were implemented to explore different modeling paradigms:
 
-- **Ridge regression** — an interpretable linear baseline that establishes a performance floor and reveals which engineered features carry signal in a simple additive framework.
+- **Ridge regression** — a linear baseline that establishes a performance floor and quantifies how far a simple additive model can go on the engineered feature set.
 - **CatBoost** — a gradient-boosted tree model designed for categorical-heavy tabular data. Selected as the **final production model** based on superior test-set performance.
 - **FT-Transformer (Keras)** — a deep learning architecture with learned embeddings for categorical features, included as evidence of advanced experimentation rather than as the production pick.
 
-This progression allows direct comparison between classical ML and deep learning approaches on the same feature set, using the same train/validation/test split.
+This model progression enables direct comparison between classical machine learning and deep learning approaches using the same features and train/validation/test split.
 
 ### Model Comparison Summary
 
@@ -51,12 +67,13 @@ This progression allows direct comparison between classical ML and deep learning
 | **Test MedianAE (full)** | $1,758 | **$1,278** | $1,302 |
 | Test RMSE (clipped 1–99%) | $4,214 | **$2,659** | $2,691 |
 | Test MAE (clipped 1–99%) | $2,655 | **$1,783** | $1,803 |
+| Test MedianAE (clipped 1–99%) | $1,735 | **$1,266** | $1,291 |
 
-CatBoost outperforms Ridge by roughly 50% on every metric and edges out the FT-Transformer by a meaningful margin, particularly on full-distribution RMSE where sensitivity to rare high-value vehicles amplifies differences.
+CatBoost outperforms Ridge by roughly 50% across every metric and edges out the FT-Transformer by a meaningful margin, particularly on full-distribution RMSE, where sensitivity to rare high-value vehicles amplifies differences.
 
 ### Key Predictive Features
 
-CatBoost feature importance analysis highlights several dominant predictors of vehicle price.
+CatBoost's feature importance analysis highlights major predictors of vehicle price. The FT-Transformer's permutation rankings largely agree—model (25.0%), manufacturer (14.4%), mileage (14.1%), and age (12.0%) also emerge as its top features—indicating these attributes consistently hold the most information across models, not just due to algorithmic bias.
 
 Top features include:
 
@@ -72,44 +89,48 @@ Top features include:
 
 The importance of **model and manufacturer** indicates that brand and vehicle class strongly influence pricing beyond simple mechanical attributes.
 
-Engine characteristics such as cylinder count and displacement also contribute predictive signal, reflecting differences in vehicle performance and market positioning.
+Engine characteristics, such as cylinder count and displacement, also contribute to the predictive signal, reflecting differences in vehicle performance and market placement.
 
-Overall, the model captures both **vehicle condition factors (age, mileage)** and **brand hierarchy (manufacturer, model)** when estimating price.
+The model integrates both **vehicle condition factors (age, mileage)** and **brand hierarchy (manufacturer, model)** when projecting price.
 
 ### Why CatBoost Won
 
 CatBoost's advantage comes from several sources. First, its native handling of categorical features avoids the dimensionality explosion that one-hot encoding creates for Ridge (972 dummy columns from 8 categorical features). Second, gradient-boosted trees naturally capture nonlinear interactions — such as the relationship between vehicle age, luxury status, and price — without requiring explicit interaction terms. Third, CatBoost's ordered boosting and built-in regularization made it robust to the long-tailed price distribution without additional preprocessing.
 
-The FT-Transformer performed competitively on clipped metrics (within ~$30 of CatBoost on clipped MAE), but its full-distribution RMSE was ~6% higher, indicating greater sensitivity to rare, high-value vehicles. For a production pricing tool where robustness across the full price range matters, CatBoost is the stronger choice.
+The FT-Transformer performed competitively on clipped metrics (within ~$30 of CatBoost on clipped MAE), but its full-distribution RMSE was ~6% higher, indicating greater sensitivity to rare, high-value vehicles. For a production pricing tool where dependability across the full price range matters, CatBoost is the stronger choice.
 
 ### Evaluation Methodology
 
-The project uses a fixed 64/16/20 train/validation/test split (155,840 / 38,960 / 48,700 rows). Split indices are persisted to JSON so all three models train and evaluate on identical rows.
+The project uses a fixed 64/16/20 train/validation/test split (155,840 / 38,960 / 48,700 rows). Split indices are persisted to JSON, so all three models train and evaluate on identical rows.
 
-Because used-car prices are highly skewed (median ~$27k but a long tail past $100k reaching $1.9M), metrics are reported in two views:
+Because used-car prices are heavily skewed (median ~$27k, but a long tail past $100k, reaching $1.9M), RMSE is dominated by rare luxury vehicles priced far above the typical market price. To address this, metrics are reported in two views:
 
-- **Full distribution** — all test rows, which reflects real-world performance including rare luxury vehicles.
-- **Clipped (1–99% of true prices)** — excludes the most extreme ~2% of listings to show performance on typical consumer vehicles.
+- **Full distribution** — all test rows, reflecting real-world performance, including rare luxury vehicles.
+- **Clipped (1–99% of true prices)** — excludes the most extreme ~2% of listings, based on training-set price quantiles, to show performance on typical consumer vehicles.
 
-Both views are important: the full distribution reveals how models handle tail risk, while the clipped view reflects the experience of a typical user.
+The gap between the two views (e.g., $3,940 vs. $2,659 RMSE for CatBoost) quantifies the impact of tail observations and provides a more complete picture than any single metric. The median absolute error remains stable across both views, indicating that most predictions are robust regardless of how outliers are handled.
 
 *Note: The test set was used as a practical benchmark during iterative development across model families. Final scores should be interpreted as strong comparative results rather than a fully untouched research-grade holdout estimate.*
-
-#### Metric Reporting Philosophy
-
-Because used-car prices are highly skewed, RMSE is dominated by rare luxury vehicles priced far above the median market. In addition to full-distribution metrics, I report 1–99% clipped metrics based on training-set price quantiles to better reflect typical consumer vehicles. Median absolute error remains stable across both views, indicating that most predictions are robust.
-
-The gap between full-distribution RMSE and clipped RMSE (e.g., $3,940 vs. $2,659 for CatBoost) quantifies the impact of tail observations and provides a more complete picture than any single metric.
 
 ### Experiment Management
 
 To maintain reproducibility, each training run writes artifacts to a timestamped run directory (e.g., `models/catboost/run_YYYYMMDD_HHMMSS/`). Each run stores model weights, hyperparameters, metrics, and schema metadata. A "latest pointer" is updated only during full training runs, and smoke runs never overwrite production artifacts.
 
-Model training is controlled via explicit retraining flags. By default, the pipeline loads existing checkpoints for fast iteration. When experimentation is needed, a retrain flag forces fresh training while preserving prior model versions with timestamped artifacts.
+Training behavior is controlled by two mechanisms: a global `TRAIN_MODE` flag and per-model `RETRAIN_*` flags.
+
+`TRAIN_MODE` controls the scope of execution:
+
+- **`full`** — runs the complete pipeline using the full dataset: data loading, feature engineering, model training (or checkpoint loading), evaluation, and artifact saving. This is the standard mode for production runs. Latest pointers are only updated in this mode.
+- **`smoke`** — a quick sanity check on a small data subset with reduced hyperparameter grids and fewer training epochs. Useful for validating code changes end-to-end without committing to a full training run. Smoke runs write versioned artifacts but never updates the latest pointers.
+- **`skip`** — bypasses all training logic and loads the latest existing artifacts directly for evaluation. Useful for regenerating plots or metrics without retraining.
+
+Per-model `RETRAIN_*` flags (`RETRAIN_RIDGE`, `RETRAIN_CATBOOST`, `RETRAIN_KERAS`) provide finer control within `full` or `smoke` modes. When set to `False` (the default), the pipeline loads existing checkpoints for that model. When set to `True`, it forces fresh training while preserving prior model versions in their timestamped run directories. This allows retraining a single model without touching the others.
+
+Additional metadata files (such as `ridge_run_info.json` and `catboost_run_info.json`) record the expected feature schema and pipeline version. When loading saved models, the code validates that the current feature pipeline matches the schema used during training, preventing accidental evaluation against incompatible feature sets.
 
 ### Data Pipeline Versioning
 
-Cleaning and feature engineering results are cached as Parquet files. A version flag (`FEATURE_PIPELINE_VERSION`) controls cache invalidation. When feature logic changes, the version is incremented so stale artifacts are automatically rebuilt.
+Cleaning and feature engineering results are cached as Parquet files. A version flag (`FEATURE_PIPELINE_VERSION`) controls cache invalidation for cleaned datasets, engineered feature tables, and the shared train/validation/test split indices. When the feature logic changes, the version is incremented to automatically rebuild stale artifacts.
 
 ## Setup and Reproducibility
 
@@ -152,11 +173,11 @@ The download helper supports current Kaggle authentication methods.
 
     pip install kaggle
 
-Once credentials are available, the notebook will download, extract, and place `cars.csv` into `data/raw/` automatically.
+Once credentials are available, the notebook will download, extract, and automatically place `cars.csv` in `data/raw/`.
 
 #### Manual download of CSV file
 
-If you prefer not to use the Kaggle CLI, manually download the dataset from Kaggle and place:
+If you prefer not to use the Kaggle CLI, manually download the dataset from Kaggle and place it:
 
     cars.csv → data/raw/cars.csv
 
@@ -198,41 +219,63 @@ This report runs **locally**. It uses:
 >   - `catboost/` (created)
 >     - `catboost_final.cbm` (latest pointer; written only on `TRAIN_MODE="full"`)
 >     - `catboost_run_info.json` (latest metadata; used for schema validation)
+>     - `catboost_final_params.json` (latest final hyperparameters)
+>     - `catboost_stage1_best_params.json` (latest Stage 1 best params)
+>     - `catboost_stage1_done.txt` (Stage 1 completion marker)
+>     - `catboost_stage2_best_params.json` (latest Stage 2 best params)
+>     - `catboost_stage2_done.txt` (Stage 2 completion marker)
+>     - `catboost_done.txt` (final training completion marker)
+>     - `feature_columns.json` (latest feature column list)
 >     - `run_{timestamp}_{train_mode}/` (created)
 >       - `catboost_final.cbm` (versioned)
 >       - `run_info.json` (written)
 >       - `final_params.json` (written)
+>       - `final_training_summary.json` (written)
 >       - `feature_columns.json` (written)
 >       - `metrics.json` (written)
+>       - `stage1_best_params.json` (written)
+>       - `stage1_done.txt` (written)
+>       - `stage2_best_params.json` (written)
+>       - `stage2_done.txt` (written)
+>       - `catboost_done.txt` (written)
 >
 >   - `keras/` (created)
 >     - `keras_model.weights.h5` (latest pointer; written only on `TRAIN_MODE="full"`)
 >     - `keras_run_info.json` (latest metadata)
->     - `train_medians.json` (latest numeric imputation values)
->     - `num_norm_stats.json` (latest normalization statistics)
->     - `lookup_vocabs.json` (latest categorical vocabularies)
+>     - `keras_train_medians.json` (latest numeric imputation values)
+>     - `keras_num_norm_stats.json` (latest normalization statistics)
+>     - `keras_lookup_vocabs.json` (latest categorical vocabularies)
+>     - `keras_history.json` (latest training history)
+>     - `keras_training_loss.png` (latest training loss curve)
+>     - `keras_training_rmse.png` (latest training RMSE curve)
+>     - `tuning_history.json` (cumulative tuning log across all rounds)
 >     - `runs/`
 >       - `run_{timestamp}_{train_mode}/` (created)
 >         - `keras_model.weights.h5` (versioned trained weights)
 >         - `run_info.json` (written)
->         - `best_hp.json` (written if tuning enabled)
 >         - `keras_metrics.json` (written)
+>         - `keras_history.json` (training history for this run)
+>         - `keras_training_loss.png` (training loss curve for this run)
+>         - `keras_training_rmse.png` (training RMSE curve for this run)
 >         - `train_medians.json` (numeric imputation values)
 >         - `num_norm_stats.json` (normalization mean/standard deviation)
 >         - `lookup_vocabs.json` (categorical vocabularies)
 >     - `tuner/`
->       - `hyperband/`
->       - `bayes/`
+>       - `ft_{tuner_kind}_{mode}_{timestamp}/` (KerasTuner project directories)
+>       - `best_hp_{mode}_ft_{tuner_kind}_{mode}_{timestamp}.json` (best hyperparameters per tuning run)
 >
 > - `notebooks/`
 >   - `01_used_car_price_regression.qmd` (this report)
 >   - `01_used_car_price_regression.html` (rendered output)
 >
-> - `notes/` (development notes; not part of the pipeline)
-> - `reports/`
-> - `scripts/`
 > - `src/`
+>   - `__init__.py`
 >   - `pipeline.py` (exported cleaning and feature engineering code)
+>   - `data_prep.py` (scaffolded for containerized pipeline)
+>   - `features.py` (scaffolded for containerized pipeline)
+>   - `train_ridge.py` (scaffolded for containerized pipeline)
+>   - `train_catboost.py` (scaffolded for containerized pipeline)
+>   - `train_keras.py` (scaffolded for containerized pipeline)
 >
 > - `.gitignore`
 > - `pyproject.toml` (project metadata and tool configuration)
@@ -241,16 +284,9 @@ This report runs **locally**. It uses:
 > - `requirements.txt` (pinned dependencies)
 > - `requirements.freeze.txt` (full environment snapshot)
 
-Artifact management and reproducibility are handled through a lightweight versioning system.  
-The variable `FEATURE_PIPELINE_VERSION` controls the version of cleaned datasets, engineered feature tables, and the shared train/validation/test split indices. When data cleaning or feature engineering logic changes, this version is incremented so cached artifacts are automatically regenerated and stale datasets are not reused.
-
-Each model directory stores both **versioned run artifacts** (`run_{timestamp}_{train_mode}`) and **latest pointers** used for evaluation and `TRAIN_MODE="skip"` workflows. Versioned runs preserve the full history of experiments, while the latest pointer provides a stable reference for downstream evaluation.
-
-Additional metadata files (such as `ridge_run_info.json` and `catboost_run_info.json`) record the expected feature schema and pipeline version. When loading saved models, the code validates that the current feature pipeline matches the schema used during training, preventing accidental evaluation of models against incompatible feature sets.
-
 ### Project Setup
 
-The setup cell loads all dependencies, defines project paths, configures training control flags, and includes a Kaggle CLI download helper that automatically fetches the raw dataset if it's not already present locally. All artifact paths follow the versioning system described in the folder structure above. The project root is also added to the Python path so modules in `src/` can be imported.
+The setup cell loads all dependencies, defines project paths, configures training control flags, and includes a Kaggle CLI download helper that automatically fetches the raw dataset if it's not already present locally. All artifact paths follow the versioning system described in the folder structure above. The project root is also added to the Python path, allowing modules in `src/` to be imported.
 ```{python}
 #| code-summary: "Libraries, paths, training flags, Kaggle download helper, and artifact utilities"
 # ===============================
@@ -318,7 +354,7 @@ RETRAIN_KERAS = False
 def find_project_root(start: Path) -> Path:
     """
     Walk upward until it finds a project marker.
-    Choose markers that exist in repo.
+    Choose markers that exist in the repo.
     """
     markers = [".git", "README.md"]
     p = start.resolve()
@@ -329,7 +365,7 @@ def find_project_root(start: Path) -> Path:
 
 PROJECT_ROOT = find_project_root(Path.cwd())
 
-# Commented out for notebook, uncomment if you want project root printed
+# Commented out for notebook render, uncomment if you want project root printed
 # print("PROJECT_ROOT =", PROJECT_ROOT)
 
 # ----------------------------
@@ -406,7 +442,7 @@ def ensure_raw_csv(
     raw_dir.mkdir(parents=True, exist_ok=True)
 
     if raw_csv_path.exists() and not force:
-        # Commented out for notebook, uncomment if you want raw dataset path printed
+        # Commented out for notebook, uncomment if you want the raw dataset path printed
         # print(f"✅ Found raw dataset: {raw_csv_path}")
         return
 
@@ -516,7 +552,7 @@ def ensure_raw_csv(
         "  - Manually rename the correct CSV to 'cars.csv' in data/raw/."
     )
 
-# Call once to ensure csv present
+# Call once to ensure CSV is present
 ensure_raw_csv(RAW_CSV, force=False)
 
 # ===============================
@@ -584,9 +620,6 @@ FINAL_INPROGRESS  = CATBOOST_DIR / "catboost_in_progress.txt"
 KERAS_DIR = MODEL_DIR / "keras"
 KERAS_DIR.mkdir(parents=True, exist_ok=True)
 
-KERAS_RUNS_DIR = KERAS_DIR
-KERAS_RUNS_DIR.mkdir(parents=True, exist_ok=True)
-
 KERAS_RUNS_DIR = KERAS_DIR / "runs"
 KERAS_RUNS_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -616,21 +649,21 @@ METRICS_PATH = METRICS_LATEST_PATH
 # ===============================
 def load_or_build(path: Path, build_fn, *, label: str):
     """
-    If `path` exists, load it. Otherwise run build_fn() and save.
+    If `path` exists, load it. Otherwise, run build_fn() and save.
     build_fn must return a DataFrame.
     """
     if path.exists():
-        # Commenting out for notebook, but can switch print for debugging
+        # Commenting out for notebook, but can switch to print for debugging
         # print(f"Loading {label} from checkpoint: {path}")
         print(f"Loading {label} from checkpoint.")
         return pd.read_parquet(path)
 
-    # Commenting out for notebook, but can switch print for debugging
+    # Commenting out for notebook, but can switch to print for debugging
     # print(f"Building {label} (checkpoint not found): {path}")
     print(f"Building {label} (checkpoint not found).")
     df_out = build_fn()
     df_out.to_parquet(path, index=False)
-    # Commenting out for notebook, but can switch print for debugging
+    # Commenting out for notebook, but can switch to print for debugging
     # print(f"Saved {label} checkpoint → {path}")
     print(f"Saved {label} checkpoint.")
     return df_out
@@ -642,7 +675,7 @@ def run_dir_name(run_ts: str, train_mode: str) -> str:
     return f"run_{run_ts}_{train_mode}"
 
 def should_update_latest(train_mode: str) -> bool:
-    # smoke will not update CATBOOST_FINAL_PATH
+    # smoke will not update latest
     return train_mode == "full"
 
 def atomic_write_bytes(path: Path, data: bytes):
@@ -700,7 +733,7 @@ The core cleaning and feature engineering functions are exported to `src/pipelin
 # Optional: export preprocessing logic to src/pipeline.py
 # -------------------------------------------------------
 
-# The full pipeline is kept directly in this notebook so
+# The full pipeline is kept directly in this notebook, so
 # the rendered HTML portfolio page contains the complete
 # implementation in one place.
 
@@ -754,7 +787,7 @@ def build_features_df(df_cleaned: pd.DataFrame) -> pd.DataFrame:
     y = np.log1p(df_cleaned["price"])
     X = df_cleaned.drop(columns=["price", "seller_name"], errors="ignore").copy()
 
-    REFERENCE_YEAR = 2023 #The dataset ends in the beginning of 2023
+    REFERENCE_YEAR = 2023 #The dataset ends at the beginning of 2023
 
     # age and mileage per year
     X["age"] = REFERENCE_YEAR - X["year"]
@@ -925,18 +958,18 @@ PIPELINE_PY.write_text(pipeline_code, encoding="utf-8");
 
 Because the dataset is large (~762k rows), the project begins by restricting to fully observed records. This simplifies early feature engineering while retaining more than enough data for training (243,500 rows after cleaning). Later feature engineering steps (e.g., parsing engine specs from free text) reintroduce sparse missing values, which are handled downstream using missingness indicators and model-specific imputations.
 
-This is a deliberate choice: rather than imputing hundreds of thousands of missing values before understanding the data, the pipeline starts clean and adds complexity only where it improves signal.
+This is a deliberate choice: rather than imputing hundreds of thousands of missing values before understanding the data, the pipeline starts clean and adds complexity only where it improves the signal.
 
 #### Key Cleaning Decisions
 
 - **MPG field**: The raw `mpg` column contained hyphenated ranges (e.g., "39-38"). These were split and averaged into a single `mpg_avg` numeric feature.
 - **Binary flags**: `accidents_or_damage`, `one_owner`, and `personal_use_only` were cast to integer binary columns.
 - **Dropped rows with nulls**: After computing `mpg_avg`, rows with any remaining missing values were dropped. This reduced the dataset from ~762k to ~243k rows — a substantial reduction, but the remaining dataset is still large enough to support reliable modeling.
-- **Log-transformed target**: Raw prices are heavily right-skewed (median ~$27k, long tail past $100k). A `log1p` transformation stabilizes variance and lets models optimize on relative rather than absolute errors. Predictions are converted back to dollars via `expm1` at evaluation time.
+- **Log-transformed target**: Raw prices are heavily right-skewed (median ~$27k, long tail past $100k). A `log1p` transformation stabilizes variance and allows models to optimize on relative rather than absolute errors. Predictions are converted back to dollars via `expm1` at evaluation time.
 
 #### Import Raw and Display Original Data
 
-The raw dataset contains 762,091 listings across 20 columns. Missing values are concentrated in `price_drop` (46%), `seller_rating` (28%), and `mpg` (19%):
+The raw dataset contains 762,091 listings across 20 columns. Missing values are concentrated in a few columns — `price_drop` (46% of rows missing), `seller_rating` (28%), and `mpg` (19%):
 ```{python}
 #| code-summary: "Load raw CSV and display column info"
 df_raw = pd.read_csv(RAW_CSV)
@@ -956,7 +989,7 @@ display(df_raw.head())
 
 #### Clean Dataset, Save to Parquet, and Display Cleaned Dataframe
 
-The cleaning function computes `mpg_avg`, drops incomplete rows, and casts binary flags. Results are cached as a Parquet checkpoint.
+The cleaning function computes `mpg_avg`, drops incomplete rows, and casts binary flags to integers. Results are cached as a Parquet checkpoint.
 ```{python}
 #| code-summary: "Cleaning function: compute mpg_avg, drop nulls, cast binary flags"
 def build_cleaned_df():
@@ -972,7 +1005,7 @@ def build_cleaned_df():
     )
     df_cleaned = df_cleaned.drop(columns="mpg")
 
-    # For this project it intentionally starts with a fully observed subset
+    # For this project, it intentionally starts with a fully observed subset
     # of the dataset to simplify early feature engineering and modeling.
     
     # The dataset is large enough that dropping incomplete rows does not
@@ -1060,7 +1093,7 @@ display(formatted)
 fig, ax = plt.subplots(figsize=(8, 5))
 sns.histplot(df_cleaned["price"], bins=60, ax=ax)
 ax.xaxis.set_major_formatter(mtick.StrMethodFormatter("${x:,.0f}"))
-ax.set_title("Distribution of car price", fontsize=14)
+ax.set_title("Distribution of Car Price", fontsize=14)
 ax.set_xlabel("Price")
 plt.tight_layout()
 plt.show()
@@ -1068,7 +1101,7 @@ plt.show()
 
 ```{python}
 #| code-summary: "Price distribution (1–99% clipped)"
-#| fig-cap: "With outliers removed, the distribution is right-skewed but roughly unimodal, peaking around $15k–$20k."
+#| fig-cap: "With outliers removed, the distribution is right-skewed but roughly unimodal, peaking around $22k–$25k."
 low, high = df_cleaned["price"].quantile([0.01, 0.99])
 price_filtered = df_cleaned["price"].clip(lower=low, upper=high)
 
@@ -1087,16 +1120,20 @@ plt.show()
 order = df_cleaned["manufacturer"].value_counts(ascending=False).index
 
 sns.countplot(x="manufacturer", data=df_cleaned, hue="manufacturer", order=order, palette="viridis")
-plt.title("Distribution of car manufacturers", fontsize=14)
+plt.title("Distribution of Car Manufacturers", fontsize=14)
+plt.xlabel("Manufacturer")
+plt.ylabel("Count")
 plt.xticks(rotation=90)
 plt.show()
 ```
 
 ```{python}
 #| code-summary: "Year distribution"
-#| fig-cap: "Listings grow exponentially from 2015 onward, with 2020 as the most common model year. Pre-2010 vehicles are sparse."
+#| fig-cap: "Listings grow sharply from 2010 onward, with 2020 as the most common model year. Pre-2010 vehicles are sparse."
 sns.countplot(x="year", data=df_cleaned, hue="year", palette="bright", legend=False)
-plt.title("Distribution of car years", fontsize=14)
+plt.title("Distribution of Car Years", fontsize=14)
+plt.xlabel("Year")
+plt.ylabel("Count")
 plt.xticks(rotation=90)
 plt.show()
 ```
@@ -1121,13 +1158,13 @@ sns.barplot(
 plt.xticks(rotation=90)
 plt.ylabel("Unique Model Count")
 plt.xlabel("Manufacturer")
-plt.title("Distribution of model count per manufacturer", fontsize=14)
+plt.title("Distribution of Model Count Per Manufacturer", fontsize=14)
 plt.show()
 ```
 
 ```{python}
 #| code-summary: "Price by manufacturer (full range)"
-#| fig-cap: "Porsche and Land Rover show extreme outliers above $1M. Most brands cluster below $100k."
+#| fig-cap: "Porsche and BMW show extreme outliers above $1M. Most brands cluster below $100k."
 order = (
     df_cleaned
     .groupby("manufacturer")["price"]
@@ -1138,7 +1175,11 @@ order = (
 
 sns.boxplot(data=df_cleaned, x="manufacturer", y="price", order=order, palette="viridis", hue="manufacturer")
 plt.title("Car Price Distribution by Manufacturer", fontsize=14)
+plt.xlabel("Manufacturer")
+plt.ylabel("Price")
+plt.gca().yaxis.set_major_formatter(mtick.StrMethodFormatter("${x:,.0f}"))
 plt.xticks(rotation=90)
+plt.tight_layout()
 plt.show()
 ```
 
@@ -1165,7 +1206,11 @@ order = (
 
 sns.boxplot(data=df_cleaned_filtered, x="manufacturer", y="price", order=order, palette="viridis", hue="manufacturer")
 plt.title("Car Price Distribution by Manufacturer (1–99% within each maker)", fontsize=14)
+plt.xlabel("Manufacturer")
+plt.ylabel("Price")
+plt.gca().yaxis.set_major_formatter(mtick.StrMethodFormatter("${x:,.0f}"))
 plt.xticks(rotation=90)
+plt.tight_layout()
 plt.show()
 ```
 
@@ -1175,23 +1220,27 @@ Several patterns in the exploratory analysis directly informed modeling decision
 
 **Price distribution is heavily right-skewed.** The raw price histogram shows the vast majority of vehicles clustered below $100k, with a long tail extending past $1M. This motivated the log-transform of the target variable and the dual-reporting strategy (full vs. clipped metrics). Without the log-transform, models would disproportionately optimize for expensive outliers at the expense of typical vehicles.
 
-**Toyota, Ford, and Jeep dominate the dataset.** The manufacturer distribution is imbalanced — the top 3 brands each have 15,000+ listings while brands like Jaguar and Mitsubishi have under 3,000. This imbalance means model performance will naturally be better for well-represented brands, and rare brand predictions carry more uncertainty.
+**Toyota, Ford, and Jeep dominate the dataset.** The manufacturer distribution is imbalanced — the top 3 brands each have 15,000+ listings, while brands like Jaguar and Mitsubishi have fewer than 3,000. This imbalance means model performance will naturally be better for well-represented brands, while rare-brand predictions carry more uncertainty.
 
-**Recent model years are overrepresented.** The year distribution shows exponential growth in listings from 2015 onward, with 2020 being the most common year. This means the models see relatively few examples of older vehicles (pre-2010), which partially explains why residuals tend to increase for vehicles older than ~15 years.
+**Recent model years are overrepresented.** The year distribution shows sharp growth in listings from 2010 onward, with 2020 as the most common model year. Pre-2010 vehicles are sparse, which means predictions for older vehicles are based on substantially less training data.
 
 **Luxury brands have higher price variance.** The box plot of price by manufacturer (clipped to 1–99%) shows that Porsche, Land Rover, and Mercedes-Benz have substantially wider interquartile ranges than mass-market brands. This motivated the `is_luxury_brand` flag and the `luxury_age_interaction` feature, allowing models to learn separate depreciation curves for luxury vs. non-luxury vehicles.
 
-**Model count varies widely by manufacturer.** Volkswagen and Toyota each have 350+ unique model names, while Chrysler has under 100. This high cardinality in the `model` column is one reason CatBoost's native categorical handling outperforms Ridge's one-hot encoding approach.
+**Several text columns have very high cardinality.** Exterior color (4,172 unique values), interior color (2,115), engine (1,818), and transmission (255) are all free-text fields with OEM-specific naming conventions. These require structured extraction and consolidation before modeling — addressed in the [Feature Engineering](#feature-engineering) section below.
+
+**Model count varies widely by manufacturer.** Volkswagen and Toyota each have 350+ unique model names, while Chrysler has fewer than 100. Combined with the 5,680 unique model values across all manufacturers, this high cardinality is one reason CatBoost's native categorical handling outperforms Ridge's one-hot encoding approach.
 
 ### Feature Engineering
 
 The raw dataset contains several high-cardinality text fields that need structured extraction before modeling. The goal is to collapse noisy text categories into a few semantically meaningful features so that even the linear model (Ridge) sees signal rather than thousands of brittle dummy variables.
 
+The `seller_name` column was dropped entirely — with thousands of unique sellers, the feature has high cardinality but minimal generalizable signal. A specific dealer's name is unlikely to predict price in a way that transfers to new listings.
+
 #### Engine Parsing
 
 The raw `engine` column is a free-text field with inconsistent formatting (e.g., "2.0L I4 Turbo", "V8 Flex Fuel", "3.6L V6 24V MPFI DOHC"). Rather than one-hot encoding 1,818 unique strings, I extracted five structured features: displacement (liters), cylinder count, engine layout (I/V/H), forced induction (turbo/supercharged), and hybrid status.
 
-Missing engine attributes arose from heterogeneous text formats rather than data loss — this is structured missingness due to information compression, not sensor failure. I preserved those rows and handled partial observability via median imputation for numeric attributes and explicit "unknown" categories for nominal attributes.
+Missing engine attributes arose from heterogeneous text formats rather than data loss — this is structured missingness due to information compression, not sensor failure. I preserved those rows and handled partial observability by median imputation for numeric attributes and by explicitly writing “unknown” for categories with nominal attributes.
 
 #### Transmission Normalization
 
@@ -1205,7 +1254,7 @@ Raw exterior colors had 4,000+ unique OEM-specific names ("Scarlet Ember", "Sarg
 
 #### Derived Features
 
-- **Vehicle age**: `REFERENCE_YEAR (2023) - year`. A continuous feature more informative than raw year for depreciation modeling.
+- **Vehicle age**: `REFERENCE_YEAR (2023) - year`. A more interpretable framing than raw years for depreciation modeling, and generalizes better if applied to future data.
 - **Mileage per year**: `mileage / max(age, 1)`. Captures usage intensity — a 5-year-old car with 100k miles has been driven harder than one with 30k miles.
 - **Luxury brand flag**: A binary indicator for premium manufacturers (Porsche, BMW, Mercedes-Benz, etc.).
 - **Luxury × age interaction**: Allows models to learn that luxury vehicles may depreciate differently than mass-market ones.
@@ -1225,13 +1274,13 @@ def build_features_df():
 
     # Log-transform the target: raw prices are heavily right-skewed
     # (median ~$27k, but a long tail past $100k). log1p stabilizes
-    # variance and lets the models optimize on relative rather than
+    # variance and let the models optimize on relative rather than
     # absolute errors. Predictions are converted back to dollars
     # via expm1 at evaluation time.
     y = np.log1p(df_cleaned["price"])
     X = df_cleaned.drop(columns=["price", "seller_name"], errors="ignore").copy()
 
-    REFERENCE_YEAR = 2023 # The dataset ends in the beginning of 2023
+    REFERENCE_YEAR = 2023 # The dataset ends at the beginning of 2023
 
     # age and mileage per year
     X["age"] = REFERENCE_YEAR - X["year"]
@@ -1249,7 +1298,7 @@ def build_features_df():
 
     # Luxury brands tend to hold value differently (higher base price,
     # steeper or shallower depreciation). The binary flag and its
-    # interaction with age let the model learn separate depreciation
+    # interaction with age, let the model learn separate depreciation
     # curves for luxury vs. non-luxury vehicles.
     LUXURY_BRANDS = {
         "ACURA", "ALFA ROMEO", "ASTON MARTIN", "AUDI", "BENTLEY", "BMW", "BUGATTI", "CADILLAC", "FERRARI", "GENESIS", "INFINITI", "JAGUAR", "LAMBORGHINI", "LAND ROVER", "LEXUS", "LINCOLN", "LOTUS", "MASERATI", "MCLAREN", "MERCEDES BENZ", "POLESTAR", "PORSCHE", "ROLLS-ROYCE", "TESLA", "VOLVO"
@@ -1267,7 +1316,7 @@ def build_features_df():
     X = X.drop(columns=["manufacturer_norm"])
 
     # The raw 'engine' column is a free-text field with inconsistent
-    # formatting (e.g. "2.0L I4 Turbo", "V8 Flex Fuel", "3.6L V6 24V").
+    # formatting (e.g., "2.0L I4 Turbo", "V8 Flex Fuel", "3.6L V6 24V").
     # This parser extracts structured numeric and categorical features
     # (displacement, cylinder count, layout, forced induction, hybrid
     # status) to replace the high-cardinality raw string.
@@ -1362,9 +1411,7 @@ def build_features_df():
 
     # Same approach as exterior: collapse OEM interior names ("Jet Black
     # Leather", "Sandstone") into 7 base groups. Interior color has a
-    # weaker price signal than exterior but still captures preferences
-    # (black interiors are overwhelmingly common; brown/beige may
-    # correlate with trim level).
+    # weaker price signal than exterior but still captures preferences.
     def interior_color_base(c):
         c = str(c).lower().strip()
         if "black" in c or "ebony" in c or "jet" in c:
@@ -1417,7 +1464,7 @@ X = features_df.drop(columns=["target_log1p_price"])
 
 #### Display Dataframe After Feature Engineering
 
-The engineered feature set has 27 columns — down from the raw dataset's high-cardinality text fields:
+The engineered feature set has 27 columns — replacing the raw dataset's high-cardinality text fields with structured, model-ready features:
 ```{python}
 #| code-summary: "Feature table preview"
 #| column: page
@@ -1439,7 +1486,7 @@ To understand the strengths and limitations of different model families for tabu
 1. **Regularized Linear Model (Ridge)**
    - Provides an interpretable baseline.
    - Requires extensive feature engineering and one-hot encoding.
-   - Helps determine how much signal exists in linear relationships.
+   - Establishes a performance floor, showing what's achievable with a purely linear approach.
 
 2. **Gradient Boosted Decision Trees (CatBoost)**
    - Designed for tabular data with categorical variables.
@@ -1466,11 +1513,11 @@ The dataset was split into three partitions:
 Performance is reported using:
 
 - **MAE (Mean Absolute Error)** — average dollar prediction error
-- **RMSE (Root Mean Squared Error)** — penalizes large errors
-- **Median Absolute Error** — robust measure of typical error
+- **RMSE (Root Mean Squared Error)** — more sensitive to large errors than MAE due to squaring
+- **Median Absolute Error** — robust measure of typical error, unaffected by outliers
 
 Because the price distribution contains rare luxury vehicles priced far above the median market value,  
-metrics are also reported on a **1–99% clipped subset** based on the true price distribution.
+metrics are also reported on a **1–99% clipped subset** based on training-set price quantiles.
 
 This provides a more representative view of typical used-vehicle predictions.
 
@@ -1484,9 +1531,9 @@ SPLIT_SEED = 42
 def make_or_load_splits(X, y, path=SPLITS_PATH, seed=SPLIT_SEED, test_size=0.2, val_size=0.2):
     """
     Creates:
-      - test split: test_size (e.g. 0.2)
-      - then splits remaining into train/val with val_size fraction of the remaining
-    Persists indices so Ridge/CatBoost/Keras always use exact same rows.
+      - test split: test_size (e.g., 0.2)
+      - then splits the remaining into train/val with val_size fraction of the remaining
+    Persists indices so Ridge/CatBoost/Keras always use the exact same rows.
     """
     if path.exists():
         split_idx = json.loads(path.read_text())
@@ -1555,7 +1602,7 @@ CATEGORICAL_FEATURES = [
     "transmission_clean", "exterior_color_base", "interior_color_base",
 ]
 
-# Filter to columns that actually exist as safety check
+# Filter to columns that actually exist as a safety check
 num_cols = [c for c in NUMERIC_FEATURES if c in X_train.columns]
 cat_cols = [c for c in CATEGORICAL_FEATURES if c in X_train.columns]
 
@@ -1888,9 +1935,9 @@ else:
 
 #### Ridge Interpretation
 
-The Ridge regression achieved a test MAE of ~$3,013 and RMSE of ~$7,827, serving as a strong interpretable baseline. The gap between MAE and RMSE indicates that while typical pricing errors are modest (~$1,758 median absolute error), a few high-value or atypical vehicles contribute disproportionately to total error.
+The Ridge regression achieved a test MAE of ~$3,013 and a test RMSE of ~$7,827, serving as a linear baseline. The gap between MAE and RMSE indicates that while typical pricing errors are modest (~$1,758 median absolute error), a few high-value or atypical vehicles contribute disproportionately to total error.
 
-When clipped to the 1–99% price range ($7k–$91k), Ridge's RMSE drops to $4,214 — nearly half the full-distribution value. This confirms that the linear model handles the bulk of the market well but struggles with rare luxury vehicles where pricing is driven by factors not well-captured by additive features.
+When clipped to the 1–99% price range ($7k–$91k), Ridge's RMSE drops to $4,214 — nearly half the full-distribution value. This confirms that the linear model handles the bulk of the market well but struggles with rare luxury vehicles, where pricing is driven by factors not well captured by additive features.
 
 The Ridge model used 991 total features (19 numeric + 972 one-hot encoded categorical dummies). This high dimensionality from one-hot encoding is one reason tree-based models, which handle categories natively, have an architectural advantage on this dataset.
 
@@ -1932,7 +1979,7 @@ def print_catboost_status_global_and_latest_run(catboost_dir: Path):
     print("  Stage 2:", _status_label(s2_done, s2_prog))
     print("  Final:  ", _status_label(f_done, f_prog))
 
-    # Point out whether model file exists in that run
+    # Point out whether the model file exists in that run
     model_path = latest / "catboost_final.cbm"
     print("  Model file:", "✅ present" if model_path.exists() else "— missing")
 ```
@@ -2007,7 +2054,7 @@ def get_catboost_training_data(X, y, *, mode="full"):
 
         # Two-stage grid search strategy:
         # Stage 1 searches the structural hyperparameters (depth, learning
-        # rate, L2 regularization) that have the largest effect on model
+        # rate, L2 regularization) that have the largest effect on the model
         # capacity. Running these first narrows the search space so that
         # Stage 2 can focus on finer regularization knobs (subsampling,
         # feature fraction, bagging temperature) around the Stage 1 winner.
@@ -2040,7 +2087,7 @@ def get_catboost_training_data(X, y, *, mode="full"):
         # After best_iteration is found using VAL, optionally refit on train+val
 
         # After finding best_iteration via early stopping on the validation
-        # set, optionally refit the final model on train+val combined.
+        # set, optionally refit the final model on the combined train+val.
         # This uses ~20% more data for the production model. The risk is
         # that the optimal iteration count may differ slightly without a
         # held-out stopping signal, so refit_iteration_buffer (e.g. 1.05)
@@ -2131,7 +2178,7 @@ if TRAIN_MODE == "skip":
 
 else:
     # --------------------------------------------
-    # Full mode can load existing latest
+    # Full mode can load existing latest model or train
     # --------------------------------------------
     if (TRAIN_MODE == "full") and CATBOOST_FINAL_PATH.exists() and (not RETRAIN_CATBOOST):
         print("✅ Loading existing CatBoost final model (RETRAIN_CATBOOST=False, TRAIN_MODE='full'):")
@@ -2258,7 +2305,7 @@ else:
                     param_grid=param_grid_1,
                     scoring="neg_root_mean_squared_error",
                     cv=cv1,
-                    n_jobs=1,
+                    n_jobs=1, # n_jobs=1 because CatBoost handles its own internal parallelism
                     verbose=2
                 )
 
@@ -2632,7 +2679,7 @@ CatBoost is the **selected final model** for this project, achieving the best pe
 
 **Feature importance highlights**: CatBoost's built-in feature importance reveals that `age` (19.0%) and `mileage` (14.3%) are the dominant predictors, followed by `model` (11.0%) and `manufacturer` (9.4%). This aligns with domain knowledge — depreciation (age + mileage) is the primary driver of used-car pricing, while make and model capture brand and segment effects.
 
-Notably, `mpg_avg` (8.1%) ranks higher than `engine_cylinders` (6.1%), suggesting that fuel efficiency carries meaningful price signal beyond what engine size alone captures. The `luxury_age_interaction` feature (3.2%) confirms that luxury vehicles do follow distinct depreciation patterns.
+Notably, `mpg_avg` (8.1%) ranks higher than `engine_cylinders` (6.1%), suggesting that fuel efficiency carries a meaningful price signal beyond what engine size alone captures. The `luxury_age_interaction` feature (3.2%) provides modest additional signal beyond the `is_luxury_brand` flag (6.4%) and `age` (12.0%) alone, suggesting that luxury depreciation patterns differ enough from those of mass-market vehicles to justify the interaction term.
 
 ### FT-Transformer (Learned Embeddings + Attention)
 
@@ -2667,12 +2714,13 @@ FT_CFG = {
     "min_lr": 1e-6,          # floor for cosine tail
     "weight_decay": 1e-4,    
     "clipnorm": 1.0,
-    "huber_delta": 1.0,
     # Huber loss instead of MSE: the dataset has price outliers (exotics,
     # collector cars) that can dominate squared-error gradients. Huber
     # transitions from quadratic to linear loss beyond delta, making
     # training more robust to extreme residuals without fully discarding
     # them the way MAE would.
+    "huber_delta": 1.0,
+    
 
     # transformer
     "d_token": 96,
@@ -2945,7 +2993,7 @@ class RMSEDollars(tf.keras.metrics.Metric):
 # learning rate kicks in — important for transformer architectures
 # where early large updates can cause training instability. The cosine
 # decay provides a smooth LR reduction that avoids the sharp drops
-# of step-based schedules and typically leads to better final
+# of step-based schedules, and typically leads to better final
 # convergence for models trained with a fixed epoch budget.
 
 @tf.keras.utils.register_keras_serializable(package="erin")
@@ -3047,12 +3095,12 @@ def build_ft_transformer_model(lr_schedule):
     #   projected into one d_token-dimensional vector. Tuning round 3
     #   tested num_tokens=4 (one token per feature group), which improved
     #   MAE/MedianAE but worsened full-range RMSE — the added capacity
-    #   fit outliers harder without improving the bulk of predictions.
+    #   fit outliers more aggressively without worsening the bulk of predictions.
     
     # - Global average pooling (not CLS token): averages across all
     #   token positions rather than relying on a single learned CLS
     #   token. This is more stable for tabular data where there's no
-    #   natural "sequence start" and every token carries useful signal.
+    #   natural "sequence start" and every token carries a useful signal.
 
     # Numeric tokenization
     if num_tokens == 1:
@@ -4135,7 +4183,9 @@ else:
     else:
         print("ℹ️ Smoke mode: not saving Keras training history or plots.")
 
-    # Save versioned weights only
+    # Save weights only (not full model) to avoid serialization issues
+    # with custom layers and schedules. Reconstruction artifacts are
+    # saved alongside for reproducible model rebuilding.
     model.save_weights(versioned_weights_path)
     # print("💾 Saved versioned weights:", versioned_weights_path)
 
@@ -4205,7 +4255,7 @@ else:
         # num_cols_nn, cat_cols_nn, and LOOKUP_VOCABS to rebuild the model architecture,
         # then restores them in a finally block. This means model_eval was *built* with
         # the saved artifact's config, but the current globals reflect the notebook's
-        # live config — which may differ (e.g. after tuning or code edits).
+        # live config — which may differ (e.g., after tuning or code edits).
         
         # Any code using model_eval must pull feature names, vocab, and normalization
         # stats from eval_art (the returned artifact dict), NOT from the live globals.
@@ -4581,9 +4631,9 @@ The FT-Transformer was included as evidence of advanced experimentation with dee
 
 **Permutation importance**: The permutation-based feature importance largely agrees with CatBoost's rankings — `model` (25.0%), `manufacturer` (14.4%), `mileage` (14.1%), and `age` (12.0%) are the top features. The consistency across model families suggests these are genuinely the most informative features rather than artifacts of a particular algorithm.
 
-**Training behavior**: The training curves show healthy convergence with train and validation loss both decreasing and stabilizing by ~epoch 30. The small gap between them indicates minimal overfitting.
+**Training behavior**: The Huber loss curves show rapid initial convergence, with both train and validation loss decreasing sharply through ~epoch 15. After that, train loss continues to slowly decrease while validation loss plateaus, indicating mild overfitting in later epochs — which is expected and handled by early stopping, which restores weights from the best-generalizing epoch. The RMSE (dollar) curves show more pronounced volatility, as RMSE in dollar space amplifies the effect of individual high-value predictions.
 
-**Why CatBoost still wins**: On this dataset, CatBoost's native categorical handling and ordered boosting provide a structural advantage over learned embeddings. The FT-Transformer requires more data and tuning to match tree-based methods on tabular problems — a finding consistent with the broader ML literature (e.g., Grinsztajn et al., 2022).
+**Why CatBoost still wins**: On this dataset, CatBoost's native categorical handling and ordered boosting provide a structural advantage over learned embeddings. The FT-Transformer requires more data and tuning to match the performance of tree-based methods on tabular problems — a finding consistent with the broader ML literature (e.g., Grinsztajn et al., 2022).
 
 **Practical considerations**: Beyond raw accuracy, the FT-Transformer required substantially more development effort. Hyperparameter tuning (embedding dimensions, attention heads, learning rate schedules, dropout) involved longer iteration cycles than CatBoost's staged grid search, and the model was more sensitive to batch size and learning rate choices — small changes that barely affected CatBoost could destabilize Keras training. Total training time was also significantly longer. For a production system where maintainability and retrainability matter, CatBoost's combination of better performance, faster training, and lower tuning fragility makes it the clear choice.
 
@@ -4797,7 +4847,7 @@ def plot_regression_diagnostics(
     Plots:
       1) Predicted vs Actual
       2) Residuals vs Predicted
-      3) Residuals vs a chosen feature (e.g. age or mileage)
+      3) Residuals vs a chosen feature (e.g., age or mileage)
       
     Clips by y_true quantiles for readability for some charts.
     """
@@ -5088,113 +5138,20 @@ else:
     print("ℹ️ Only one model available — skipping pred-vs-pred comparison plots.")
 ```
 
-```{python}
-# # =========================
-# # Model Comparison Plots -- using test set
-# # =========================
-
-# if ("X_test" not in globals()) or ("y_test" not in globals()):
-#     print("⚠️ X_test/y_test not found — cannot plot comparisons.")
-# else:
-#     y_true_test = np.expm1(y_test)
-
-#     # Choose feature for residual-vs-feature
-#     feature_name = "age" if "age" in X_test.columns else ("mileage" if "mileage" in X_test.columns else None)
-
-#     # ----------------------------------------------------------
-#     # Collect predictions from any models that exist
-#     # ----------------------------------------------------------
-#     preds = {}
-
-#     if ("best_ridge" in globals()) and (best_ridge is not None):
-#         preds["Ridge"] = np.expm1(best_ridge.predict(X_test))
-#     else:
-#         print("ℹ️ Ridge not available — skipping Ridge plots.")
-
-#     if ("final_cb" in globals()) and (final_cb is not None):
-#         preds["CatBoost"] = np.expm1(final_cb.predict(X_test))
-#     else:
-#         print("ℹ️ CatBoost not available — skipping CatBoost plots.")
-
-#     # Use evaluation-ready Keras objects if available
-#     if ("model_eval" in globals()) and (model_eval is not None) and ("test_inputs_tf_eval" in globals()):
-#         preds["Keras"] = predict_dollars(test_inputs_tf_eval)
-#     else:
-#         print("ℹ️ Keras evaluation model/inputs not available — skipping Keras plots.")
-
-#     if len(preds) == 0:
-#         print("⚠️ No model predictions available — nothing to plot.")
-#     else:
-#         # ----------------------------------------------------------
-#         # 3 diagnostic plots + abs error plot for each model
-#         # (unclipped + clipped)
-#         # ----------------------------------------------------------
-#         for name, y_pred in preds.items():
-#             plot_regression_diagnostics(
-#                 y_true_test, y_pred,
-#                 X_ref=X_test,
-#                 feature_for_residual=(feature_name or "age"),
-#                 clip=False,
-#                 title_prefix=f"{name} |"
-#             )
-#             plot_regression_diagnostics(
-#                 y_true_test, y_pred,
-#                 X_ref=X_test,
-#                 feature_for_residual=(feature_name or "age"),
-#                 clip=True, q_low=0.01, q_high=0.99,
-#                 title_prefix=f"{name} |"
-#             )
-
-#             plot_abs_error_vs_actual(
-#                 y_true_test, y_pred,
-#                 clip=False,
-#                 title_prefix=f"{name} |",
-#                 log_x=True
-#             )
-#             plot_abs_error_vs_actual(
-#                 y_true_test, y_pred,
-#                 clip=True, q_low=0.01, q_high=0.99,
-#                 title_prefix=f"{name} |",
-#                 log_x=True
-#             )
-
-#         # ----------------------------------------------------------
-#         # 4th plot: pred vs pred for every pair of models
-#         # (unclipped + clipped)
-#         # ----------------------------------------------------------
-#         model_names = list(preds.keys())
-#         if len(model_names) >= 2:
-#             for i in range(len(model_names)):
-#                 for j in range(i + 1, len(model_names)):
-#                     a = model_names[i]
-#                     b = model_names[j]
-
-#                     plot_pred_vs_pred(
-#                         preds[a], preds[b],
-#                         name_a=a, name_b=b,
-#                         clip=False
-#                     )
-#                     plot_pred_vs_pred(
-#                         preds[a], preds[b],
-#                         name_a=a, name_b=b,
-#                         clip_by_y_true=y_true_test,
-#                         clip=True, q_low=0.01, q_high=0.99
-#                     )
-#         else:
-#             print("ℹ️ Only one model available — skipping pred-vs-pred comparison plots.")
-```
-
 #### Model Graphs Interpretation
+*Note: y-axis scales differ across models to preserve detail in each plot. Refer to the metrics tables for direct numerical comparisons.*
 
-**Predicted vs. Actual (unclipped)**: The most visible progression across models is how tightly predictions track the diagonal. Ridge shows substantial scatter above ~$100k, with predictions compressing toward the center — a hallmark of linear models that regress toward the mean on extreme values. CatBoost and the FT-Transformer both track the diagonal much more faithfully up through ~$200k, though all three models underpredict the most expensive vehicles ($300k+). This is expected: the log-space loss treats a 2× error equally whether the car costs $20k or $200k, so the models optimize for relative accuracy rather than chasing rare ultra-luxury outliers.
+**Predicted vs. Actual (unclipped)**: The most visible progression across models is how tightly predictions track the diagonal. Ridge shows substantial scatter above ~$100k, with predictions capping out around $300k–$350k — vehicles priced at $400k+ are severely underpredicted, some by $300k or more. This is a fundamental limitation of a linear model on a log-transformed target with extreme tail values. CatBoost and the FT-Transformer both track the diagonal much more faithfully up through ~$200k, though all three models underpredict the most expensive vehicles ($300k+). This is expected: the log-space loss treats a 2× error equally whether the car costs $20k or $200k, so the models optimize for relative accuracy rather than chasing rare ultra-luxury outliers.
 
-**Residuals vs. Predicted**: Ridge shows a clear fan shape — residual variance increases with predicted price, indicating heteroscedasticity that the linear model cannot capture. CatBoost's residuals are much tighter and more symmetric around zero, with only isolated large positive residuals (underpredictions on high-value vehicles). The FT-Transformer's residual pattern is similar to CatBoost's, though with slightly more spread at the high end.
+**Residuals vs. Predicted**: Ridge shows the widest residual spread at low-to-moderate predicted prices ($0–$150k), with large positive residuals (underpredictions) dominating. This reflects Ridge's tendency to compress expensive vehicles toward the center — cars actually worth $300k+ are predicted at $50k–$150k,placing their large residuals in the lower predicted range rather than the upper. CatBoost's residuals are much tighter and more symmetric around zero for typical vehicles, with isolated large residuals in both directions at higher predicted values. The FT-Transformer's residual pattern is similar to CatBoost's, with both models showing scattered positive and negative residuals at the high end — reflecting the inherent difficulty of pricing rare luxury vehicles. Across all three models, positive residuals (underpredictions) are larger in magnitude than negative ones (overpredictions), which is expected given the right-skewed price distribution — there is more room to underpredict a $500k car than to overpredict a $20k one.
 
-**Residuals vs. Age**: All three models show residual variance increasing for older vehicles (age > 15), which reflects the dataset's sparse representation of pre-2008 cars. Among young vehicles (age 0–5), CatBoost produces the tightest residual band, confirming its advantage on the most data-dense segment.
+**Residuals vs. Age**: All three models show the widest residual spread for young vehicles (ages 0–7), which narrows as age increases. This is expected — younger vehicles have higher and more variable prices, so absolute errors are naturally larger. The outliers scattered at age 25+ are isolated points (likely collector or vintage vehicles) rather than a systematic pattern. CatBoost and the FT-Transformer show similar residual patterns to each other across all ages, with Ridge producing larger extreme residuals but a comparable core band.
 
-**Absolute Error vs. Actual (log scale)**: This is the most revealing diagnostic. For all three models, absolute error grows roughly linearly with actual price on a log scale — errors are proportional to vehicle value, which is the expected behavior from a log-space loss function. CatBoost's error curve sits noticeably below Ridge's across the entire price range, and slightly below the FT-Transformer's at the high end.
+**Absolute Error vs. Actual (log scale)**: For all three models, absolute error increases with actual price, accelerating sharply above ~$100k actual — reflecting both the right-skewed price distribution and the log-space loss function, which optimizes for relative rather than absolute accuracy. Ridge's errors grow the fastest, with several errors approaching $400k and one exceeding $500k. CatBoost and the FT-Transformer both maintain substantially tighter error envelopes, with the FT-Transformer showing slightly fewer extreme errors at the very high end of the price range. However, the FT-Transformer's single worst outlier (~$400k error) exceeds CatBoost's worst (~$305k), illustrating the FT-Transformer's greater sensitivity to individual high-value vehicles.
 
-**Pred vs. Pred (model agreement)**: The Ridge-vs-CatBoost plots show CatBoost systematically predicting higher than Ridge for expensive vehicles and lower for cheap ones — CatBoost captures the full price range more accurately while Ridge compresses toward the center. The CatBoost-vs-Keras plots show strong agreement along the diagonal with moderate scatter, confirming that both nonlinear models learned similar structure but disagree on individual high-value vehicles. This disagreement pattern suggests an ensemble could potentially improve tail performance.
+**Clipped views (1–99%)**: With extreme outliers removed, the diagnostic patterns become clearer. Ridge's residuals-vs-predicted plot now shows a visible fan shape — residual variance increasing with predicted price — that was obscured by the scale of the unclipped version. This is classic heteroscedasticity that the linear model cannot capture. CatBoost and the FT-Transformer both produce tighter, more symmetric residual bands across the clipped range, confirming that their advantage over Ridge is not just about handling tail outliers — they also predict typical vehicles more accurately. The absolute error plots reinforce this: Ridge's worst clipped errors reach ~$77k, compared to ~$50k for CatBoost and ~$58k for the FT-Transformer.
+
+**Pred vs. Pred (model agreement)**: The Ridge-vs-CatBoost and Ridge-vs-Keras plots both show the nonlinear models consistently predicting higher than Ridge, particularly in the mid-to-upper price range — reflecting Ridge's tendency to compress predictions toward the center. The CatBoost-vs-Keras plots show strong agreement along the diagonal and moderate scatter, confirming that both nonlinear models learned a similar structure but differ in their predictions for individual vehicles, especially at higher prices. This disagreement pattern suggests an ensemble could potentially improve tail performance.
 
 ### Final Model Selection
 
@@ -5202,26 +5159,27 @@ CatBoost is confirmed as the final model. As detailed in the [Project Background
 
 ### Key Takeaways
 
-1. **Feature engineering mattered more than model complexity.** The jump from raw features to engineered features (parsed engines, normalized transmissions, color collapsing) provided a larger performance boost than the jump from Ridge to CatBoost. All three models benefited from the same carefully engineered feature set.
+1. **Feature engineering was essential across all model classes.** Collapsing 1,818 raw engine strings into five structured features, normalizing 255 transmission variants by type and gear count, and engineering domain-informed features such as luxury-brand depreciation interactions gave all three models a clean, informative feature set. Even CatBoost, which handles categorical features natively, relied heavily on these engineered features — age, mileage, and the parsed engine attributes — all of which ranked among its top predictors.
 
-2. **CatBoost's categorical handling is a structural advantage.** On a dataset with 5,680 unique models and 1,818 unique engine strings, CatBoost's native categorical support avoids the dimensionality explosion that handicaps linear models.
+2. **CatBoost's categorical handling is a structural advantage.** Ridge required 972 one-hot encoded dummy columns to represent 8 categorical features, inflating the feature space to 991 total dimensions. CatBoost handled the same categories natively — including 5,680 unique models — without one-hot encoding and outperformed Ridge by ~50% across all metrics. This suggests that on high-cardinality tabular data, the model's ability to handle categories efficiently matters as much as the underlying algorithm.
 
-3. **Luxury vehicles exhibit higher intrinsic price variance** that is not fully explained by structured listing features. This manifests as increasing absolute error at the high end across all model classes — a data reality, not a modeling flaw.
+3. **Luxury vehicles are the hardest to price accurately.** All three models show increasing absolute error for vehicles above ~$100k, and the largest residuals are consistently observed for high-value luxury listings. This is likely because luxury pricing depends on factors not captured in the dataset — trim-level distinctions, option packages, condition details, and collector-market dynamics — that matter far more for a $400k Porsche than a $25k Toyota. The consistency of this pattern across Ridge, CatBoost, and the FT-Transformer suggests it reflects a limitation of the available features rather than any particular model's weakness.
 
-4. **Deep learning is competitive but not dominant on tabular data.** The FT-Transformer came within ~$20 of CatBoost on clipped MAE, confirming that learned embeddings can capture meaningful structure. But CatBoost's combination of native categorical support, built-in regularization, and lower tuning burden makes it the practical choice.
+4. **Deep learning is competitive but not dominant on tabular data.** The FT-Transformer came within ~$20 of CatBoost on clipped MAE, confirming that learned embeddings can capture meaningful structure. Its error profile also differed — fewer extreme errors at the high end but a larger single worst-case outlier — suggesting the two models fail on different vehicles and reinforcing the potential value of an ensemble. However, CatBoost required substantially less tuning effort, trained faster, and was more stable across hyperparameter choices, making it the practical production choice for this dataset.
 
 ### Limitations and Future Work
 
-- **Geographic features**: The dataset lacks location data (state, ZIP, metro area), which meaningfully affects used-car pricing.
-- **Temporal dynamics**: All listings are treated as a cross-section. Time-aware modeling (e.g., how pandemic-era supply constraints affected pricing) could improve accuracy.
+- **Geographic features**: The dataset lacks location data (state, ZIP code, metro area), which significantly affects used-car pricing.
+- **Temporal dynamics**: The dataset lacks listing dates, so all listings are treated as a single cross-section. Time-aware modeling could capture how market conditions (e.g., pandemic-era supply constraints) affect pricing for the same vehicle at different points in time.
 - **Ensemble methods**: A weighted blend of CatBoost and the FT-Transformer could potentially improve on either model alone, particularly for high-value vehicles where the two models disagree.
-- **Vehicle condition**: The dataset lacks granular condition descriptors (e.g., paint quality, tire wear, service history completeness) that buyers weigh heavily in practice. The `accidents_or_damage` flag captures the most extreme cases, but two "no accident" vehicles can still differ substantially in real-world value based on cosmetic and mechanical wear. 
-- **Loss function tuning**: The FT-Transformer's performance on tail observations might improve with a Huber or quantile loss function rather than MSE in log space.
+- **Vehicle condition**: The dataset lacks granular condition descriptors (e.g., paint quality, tire wear, service history completeness) that buyers weigh heavily in practice. The `accidents_or_damage` flag captures the most extreme cases, but two "no accident" vehicles can still differ substantially in real-world value based on cosmetic and mechanical wear.
+- **Luxury vehicle features**: Luxury pricing showed the highest residuals across all three models, likely because the dataset lacks features that heavily influence high-end pricing — trim level, option packages (e.g., carbon ceramic brakes, premium audio), certification status (CPO vs. private sale), and collector-market relevance. Adding these could meaningfully reduce error for vehicles above $100k.
+- **Containerized pipeline (Part 2 — planned)**: The `src/` module stubs are already scaffolded to refactor the notebook workflow into modular, independently deployable stages using Docker and Kubernetes, transitioning from a single-notebook analysis to a production-ready ML pipeline.
 
 ## Conclusion
 
 This project demonstrates that careful feature engineering combined with a well-suited model architecture can produce used-car price predictions accurate enough for real business use — within ~$1,300 of the true price for typical vehicles, across a dataset spanning 29 manufacturers and 5,680 model variants.
 
-The progression from Ridge to CatBoost to the FT-Transformer revealed that the biggest wins came from understanding the data, not from model complexity: collapsing 1,818 raw engine strings into five structured features, normalizing 255 transmission variants into type and gear count, and engineering domain-informed features like luxury-brand depreciation interactions. CatBoost captured these patterns most reliably, and its practical advantages in training speed, tuning stability, and categorical handling make it the right production choice.
+The progression from Ridge to CatBoost to the FT-Transformer revealed that understanding the data was essential: collapsing 1,818 raw engine strings into five structured features, normalizing 255 transmission variants into type and gear count, and engineering domain-informed features like luxury-brand depreciation interactions gave all three models a strong foundation. CatBoost captured these patterns most reliably, and its practical advantages in training speed, tuning stability, and categorical handling make it the right choice for production.
 
-The FT-Transformer's competitive performance confirms that deep learning can learn meaningful structure from tabular data, but on this problem it did not justify the additional engineering and tuning cost. That may change as architectures and training recipes for tabular Transformers continue to mature.
+The FT-Transformer's competitive performance confirms that deep learning can learn meaningful structure from tabular data, but on this problem, it did not justify the additional engineering and tuning cost. That may change as architectures and training recipes for tabular Transformers continue to mature.

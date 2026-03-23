@@ -27,6 +27,3 @@ requirements.freeze.txt
 render.log
 .vscode
 /notes
-
-#delete later
-V1-01_used_car_price_regression.qmd

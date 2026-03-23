@@ -34,7 +34,7 @@ def build_features_df(df_cleaned: pd.DataFrame) -> pd.DataFrame:
     y = np.log1p(df_cleaned["price"])
     X = df_cleaned.drop(columns=["price", "seller_name"], errors="ignore").copy()
 
-    REFERENCE_YEAR = 2023 #The dataset ends in the beginning of 2023
+    REFERENCE_YEAR = 2023 #The dataset ends at the beginning of 2023
 
     # age and mileage per year
     X["age"] = REFERENCE_YEAR - X["year"]
