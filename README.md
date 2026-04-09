@@ -17,18 +17,18 @@
 This project predicts used-car listing prices from 20 vehicle attributes using three progressively complex modeling approaches — Linear baseline establishing a performance 
 floor from an interpretable linear baseline through gradient-boosted trees to a deep learning transformer. The goal is not simply to minimize error, but to evaluate the practical tradeoffs between interpretability, feature engineering effort, and predictive performance on real-world tabular data.
 
-**The final model (CatBoost) predicts within ~$1,300 of the true listing price at the median**, across 29 manufacturers and 5,680 model variants — accurate enough to automate first-pass pricing, reduce manual appraisals, and surface arbitrage opportunities for dealerships, online marketplaces, and auto lenders.
+**The final model (CatBoost) predicts within ~$1,300 of the true listing price at the median**, across 29 manufacturers and 5,613 model variants — accurate enough to automate first-pass pricing, reduce manual appraisals, and surface arbitrage opportunities for dealerships, online marketplaces, and auto lenders.
 
 ## Results
 
 | Metric                          | Ridge   | CatBoost (final)  | FT-Transformer |
 | ------------------------------- | ------- | ----------------- | -------------- |
-| **Test RMSE (full)**            | \$7,827 | \$**3,940**       | \$4,193        |
-| **Test MAE (full)**             | \$3,013 | \$**1,912**       | \$1,928        |
-| **Test Median AE (full)**       | \$1,758 | \$**1,278**       | \$1,302        |
-| Test RMSE (clipped 1–99%)       | \$4,214 | \$**2,659**       | \$2,691        |
-| Test MAE (clipped 1–99%)        | \$2,655 | \$**1,783**       | \$1,803        |
-| Test Median AE (clipped 1–99%)  | \$1,735 | \$**1,266**       | \$1,291        |
+| **Test RMSE (full)**            | \$7,824 | \$**3,935**       | \$4,255        |
+| **Test MAE (full)**             | \$3,011 | \$**1,916**       | \$1,934        |
+| **Test Median AE (full)**       | \$1,759 | \$**1,280**       | \$1,305        |
+| Test RMSE (clipped 1–99%)       | \$4,211 | \$**2,665**       | \$2,677        |
+| Test MAE (clipped 1–99%)        | \$2,653 | \$**1,782**       | \$1,800        |
+| Test Median AE (clipped 1–99%)  | \$1,736 | \$**1,267**       | \$1,291        |
 
 CatBoost outperforms Ridge by ~50% on every metric and edges out the FT-Transformer by a meaningful margin, particularly on full-distribution RMSE where sensitivity to rare high-value vehicles amplifies differences.
 
@@ -38,9 +38,9 @@ Used-car pricing is a high-stakes, high-volume problem. Dealerships, online mark
 
 ## Key Findings
 
-**Feature engineering was essential across all model classes.** Collapsing 1,818 raw engine strings into five structured features, normalizing 255 transmission variants into type and gear count, and engineering domain-informed interactions (e.g., luxury-brand depreciation curves) gave all three models a clean, informative feature set. Even CatBoost relied heavily on these engineered features among its top predictors.
+**Feature engineering was essential across all model classes.** Collapsing 1,808 raw engine strings into five structured features, normalizing 221 transmission variants into type and gear count, and engineering domain-informed interactions (e.g., luxury-brand depreciation curves) gave all three models a clean, informative feature set. Even CatBoost relied heavily on these engineered features among its top predictors.
 
-**CatBoost's native categorical handling is a structural advantage.** With 5,680 unique models and 1,818 unique engine strings, CatBoost avoids the dimensionality explosion of one-hot encoding (972 dummy columns for Ridge) while capturing nonlinear interactions — like the relationship between vehicle age, luxury status, and price — without explicit interaction terms.
+**CatBoost's native categorical handling is a structural advantage.** With 5,613 unique models and 1,808 unique engine strings, CatBoost avoids the dimensionality explosion of one-hot encoding (972 dummy columns for Ridge) while capturing nonlinear interactions — like the relationship between vehicle age, luxury status, and price — without explicit interaction terms.
 
 **Deep learning is competitive but not dominant on tabular data.** The FT-Transformer came within ~$20 of CatBoost on clipped MAE, confirming that learned embeddings capture meaningful structure. But CatBoost's lower tuning burden, built-in regularization, and robustness across the full price range make it the practical production choice.
 
@@ -56,8 +56,8 @@ The dataset is the Kaggle [Used Cars Dataset](https://www.kaggle.com/datasets/an
 
 Raw listing fields were transformed into a clean, model-ready feature set:
 
-- **Engine parsing**: 1,818 unique engine description strings → displacement, cylinder count, fuel type, turbo/supercharger flags
-- **Transmission normalization**: 255 raw transmission strings → type (automatic/manual/CVT) and gear count
+- **Engine parsing**: 1,808 unique engine description strings → displacement, cylinder count, fuel type, turbo/supercharger flags
+- **Transmission normalization**: 221 raw transmission strings → type (automatic/manual/CVT) and gear count
 - **Color collapsing**: Rare exterior/interior colors grouped into canonical categories
 - **Domain features**: Vehicle age, luxury brand flag, depreciation interaction terms, accident/damage indicators
 
@@ -70,7 +70,7 @@ Raw listing fields were transformed into a clean, model-ready feature set:
 
 ### Evaluation Methodology
 
-Because used-car prices are highly skewed (median ~$27k, tail past $100k reaching $1.9M), metrics are reported in two views: **full distribution** (reflecting real-world performance including rare luxury vehicles) and **clipped 1–99%** (reflecting typical consumer vehicles). The gap between the two (e.g., $3,940 vs. $2,659 RMSE for CatBoost) quantifies the impact of tail observations.
+Because used-car prices are highly skewed (median ~$27k, tail past $100k reaching $1.9M), metrics are reported in two views: **full distribution** (reflecting real-world performance including rare luxury vehicles) and **clipped 1–99%** (reflecting typical consumer vehicles). The gap between the two (e.g., $3,935 vs. $2,665 RMSE for CatBoost) quantifies the impact of tail observations.
 
 ## Reproducibility
 
@@ -92,6 +92,7 @@ The project uses a lightweight experiment management system designed for full re
 │   ├── catboost/               # CatBoost model artifacts and run history
 │   ├── keras/                  # FT-Transformer weights, vocabs, and run history
 │   └── metrics/                # Cross-model comparison metrics
+│   ├── api_artifacts/          # Serving-layer reference artifacts (vocabs, medians, metadata)
 ├── notebooks/
 │   └── 01_used_car_price_regression.qmd   # Full analysis notebook (Quarto)
 ├── src/

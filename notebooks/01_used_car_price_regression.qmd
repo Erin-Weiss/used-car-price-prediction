@@ -62,12 +62,12 @@ This model progression enables direct comparison between classical machine learn
 
 | Metric | Ridge | CatBoost | FT-Transformer |
 |---|---|---|---|
-| **Test RMSE (full)** | $7,827 | **$3,940** | $4,193 |
-| **Test MAE (full)** | $3,013 | **$1,912** | $1,928 |
-| **Test MedianAE (full)** | $1,758 | **$1,278** | $1,302 |
-| Test RMSE (clipped 1–99%) | $4,214 | **$2,659** | $2,691 |
-| Test MAE (clipped 1–99%) | $2,655 | **$1,783** | $1,803 |
-| Test MedianAE (clipped 1–99%) | $1,735 | **$1,266** | $1,291 |
+| **Test RMSE (full)** | $7,824 | **$3,935** | $4,255 |
+| **Test MAE (full)** | $3,011 | **$1,916** | $1,934 |
+| **Test MedianAE (full)** | $1,759 | **$1,280** | $1,305 |
+| Test RMSE (clipped 1–99%) | $4,211 | **$2,665** | $2,677 |
+| Test MAE (clipped 1–99%) | $2,653 | **$1,782** | $1,800 |
+| Test MedianAE (clipped 1–99%) | $1,736 | **$1,267** | $1,291 |
 
 CatBoost outperforms Ridge by roughly 50% across every metric and edges out the FT-Transformer by a meaningful margin, particularly on full-distribution RMSE, where sensitivity to rare high-value vehicles amplifies differences.
 
@@ -97,7 +97,7 @@ The model integrates both **vehicle condition factors (age, mileage)** and **bra
 
 CatBoost's advantage comes from several sources. First, its native handling of categorical features avoids the dimensionality explosion that one-hot encoding creates for Ridge (972 dummy columns from 8 categorical features). Second, gradient-boosted trees naturally capture nonlinear interactions — such as the relationship between vehicle age, luxury status, and price — without requiring explicit interaction terms. Third, CatBoost's ordered boosting and built-in regularization made it robust to the long-tailed price distribution without additional preprocessing.
 
-The FT-Transformer performed competitively on clipped metrics (within ~$30 of CatBoost on clipped MAE), but its full-distribution RMSE was ~6% higher, indicating greater sensitivity to rare, high-value vehicles. For a production pricing tool where dependability across the full price range matters, CatBoost is the stronger choice.
+The FT-Transformer performed competitively on clipped metrics (within ~$20 of CatBoost on clipped MAE), but its full-distribution RMSE was ~8% higher, indicating greater sensitivity to rare, high-value vehicles. For a production pricing tool where dependability across the full price range matters, CatBoost is the stronger choice.
 
 ### Evaluation Methodology
 
@@ -108,7 +108,7 @@ Because used-car prices are heavily skewed (median ~$27k, but a long tail past $
 - **Full distribution** — all test rows, reflecting real-world performance, including rare luxury vehicles.
 - **Clipped (1–99% of true prices)** — excludes the most extreme ~2% of listings, based on training-set price quantiles, to show performance on typical consumer vehicles.
 
-The gap between the two views (e.g., $3,940 vs. $2,659 RMSE for CatBoost) quantifies the impact of tail observations and provides a more complete picture than any single metric. The median absolute error remains stable across both views, indicating that most predictions are robust regardless of how outliers are handled.
+The gap between the two views (e.g., $3,935 vs. $2,665 RMSE for CatBoost) quantifies the impact of tail observations and provides a more complete picture than any single metric. The median absolute error remains stable across both views, indicating that most predictions are robust regardless of how outliers are handled.
 
 *Note: The test set was used as a practical benchmark during iterative development across model families. Final scores should be interpreted as strong comparative results rather than a fully untouched research-grade holdout estimate.*
 
@@ -264,6 +264,12 @@ This report runs **locally**. It uses:
 >       - `ft_{tuner_kind}_{mode}_{timestamp}/` (KerasTuner project directories)
 >       - `best_hp_{mode}_ft_{tuner_kind}_{mode}_{timestamp}.json` (best hyperparameters per tuning run)
 >
+>   - `api_artifacts/` (created)
+>     - `categorical_vocabularies.json` (known values per categorical feature)
+>     - `models_by_manufacturer.json` (valid model names grouped by manufacturer)
+>     - `numeric_medians.json` (median imputation values for optional numeric fields)
+>     - `model_metadata.json` (feature columns, clip bounds, drivetrain map, luxury brands, pipeline version)
+>
 > - `notebooks/`
 >   - `01_used_car_price_regression.qmd` (this report)
 >   - `01_used_car_price_regression.html` (rendered output)
@@ -386,7 +392,7 @@ RAW_CSV = RAW_DIR / "cars.csv"
 
 # Bump this version whenever cleaning or feature-engineering logic changes.
 # This prevents stale cached parquet/split artifacts from being silently reused.
-FEATURE_PIPELINE_VERSION = "v2"
+FEATURE_PIPELINE_VERSION = "v3"
 
 CLEAN_PARQUET = PROCESSED_DIR / f"cars_cleaned_{FEATURE_PIPELINE_VERSION}.parquet"
 FEATURES_PARQUET = PROCESSED_DIR / f"cars_features_{FEATURE_PIPELINE_VERSION}.parquet"
@@ -726,25 +732,27 @@ if str(PROJECT_ROOT) not in sys.path:
 
 #### Export Reusable Code to /src
 
-The core cleaning and feature engineering functions are exported to `src/pipeline.py` as a standalone module. This allows the same logic to be used outside the notebook (e.g., in a CLI training script) without duplicating code. The notebook remains the primary reference version.
+The core cleaning, feature engineering, and API inference functions are exported to `src/pipeline.py` as a standalone module. This allows the same logic to be used outside the notebook — in a CLI training script or as the preprocessing layer for a FastAPI prediction endpoint — without duplicating code. The notebook remains the primary reference version.
 ```{python}
 #| echo: false
 # -------------------------------------------------------
-# Optional: export preprocessing logic to src/pipeline.py
+# Export preprocessing and inference logic to src/pipeline.py
 # -------------------------------------------------------
 
 # The full pipeline is kept directly in this notebook, so
 # the rendered HTML portfolio page contains the complete
 # implementation in one place.
 
-# For readers interested in a modular project structure,
-# the core cleaning and feature engineering functions are
-# also exported to src/pipeline.py as a reusable module.
+# For modularity, the same functions are exported to
+# src/pipeline.py, which serves two purposes:
+#   1. Batch training: build_cleaned_df() and build_features_df()
+#   2. API inference:  prepare_for_prediction() — a single-entry
+#      transform that applies identical normalization and feature
+#      engineering for real-time predictions via FastAPI.
 
 # The notebook remains the primary reference version.
 
 # NOTE: This does not change notebook execution logic; it just keeps a reusable copy in src/.
-
 # NOTE: If cleaning or feature-engineering logic changes, bump FEATURE_PIPELINE_VERSION.
 # Also keep the exported src/pipeline.py copy aligned with the notebook version.
 
@@ -755,13 +763,186 @@ pipeline_code = r'''
 from __future__ import annotations
 
 import re
+import json
 import numpy as np
 import pandas as pd
+from pathlib import Path
 
+
+# ===============================
+# Constants
+# ===============================
+
+REFERENCE_YEAR = 2023  # The dataset ends at the beginning of 2023
+
+TEXT_COLUMNS = [
+    "manufacturer", "model", "drivetrain", "fuel_type",
+    "engine", "transmission", "exterior_color", "interior_color",
+]
+
+DRIVETRAIN_MAP = {
+    "all wheel drive": "awd",
+    "awd":             "awd",
+    "four wheel drive": "4wd",
+    "4wd":              "4wd",
+    "front wheel drive": "fwd",
+    "fwd":               "fwd",
+    "rear wheel drive":  "rwd",
+    "rwd":               "rwd",
+}
+
+LUXURY_BRANDS = {
+    "acura", "alfa romeo", "aston martin", "audi", "bentley",
+    "bmw", "bugatti", "cadillac", "ferrari", "genesis",
+    "infiniti", "jaguar", "lamborghini", "land rover", "lexus",
+    "lincoln", "lotus", "maserati", "mclaren", "mercedes benz",
+    "polestar", "porsche", "rolls royce", "tesla", "volvo",
+}
+
+
+# ===============================
+# Text normalization
+# ===============================
+
+def normalize_text_basic(s: pd.Series) -> pd.Series:
+    """Normalize a pandas Series of strings: lowercase, strip,
+    replace hyphens/slashes with spaces, pad &, collapse whitespace."""
+    return (
+        s.astype(str)
+         .str.strip()
+         .str.lower()
+         .str.replace(r'[-/]', ' ', regex=True)
+         .str.replace(r'&', ' & ', regex=False)
+         .str.replace(r'\s+', ' ', regex=True)
+         .str.strip()
+    )
+
+
+def normalize_text_single(s: str) -> str:
+    """Normalize a single string. Same logic as normalize_text_basic
+    but for scalar values (used by the API inference path)."""
+    s = str(s).strip().lower()
+    s = re.sub(r'[-/]', ' ', s)
+    s = s.replace('&', ' & ')
+    s = re.sub(r'\s+', ' ', s)
+    return s.strip()
+
+
+# ===============================
+# Engine parsing
+# ===============================
+
+def parse_engine(engine: str) -> pd.Series:
+    """Extract structured features from a pre-normalized engine string."""
+    s = str(engine)
+
+    m_l = re.search(r"(\d(?:\.\d)?)\s*l\b", s)
+    liters = float(m_l.group(1)) if m_l else np.nan
+
+    m_c = re.search(r"\b([ivh])\s*(\d+)\b", s)
+    if m_c:
+        layout = m_c.group(1)
+        cylinders = int(m_c.group(2))
+    else:
+        layout = np.nan
+        cylinders = np.nan
+
+    turbo = int(("turbo" in s) or ("twin turbo" in s) or ("supercharg" in s))
+
+    hybrid = int(
+        ("hybrid" in s) or
+        ("gas electric" in s) or
+        ("phev" in s) or
+        ("plug in" in s) or
+        ("electric" in s and "gas" in s)
+    )
+
+    return pd.Series({
+        "engine_liters": liters,
+        "engine_cylinders": cylinders,
+        "engine_layout": layout,
+        "engine_turbo": turbo,
+        "engine_hybrid": hybrid,
+    })
+
+
+# ===============================
+# Transmission parsing
+# ===============================
+
+def normalize_transmission(t: str) -> str:
+    if pd.isna(t):
+        return "unknown"
+    t = str(t)
+    t = t.replace("a t", "automatic")
+    t = t.replace("auto", "automatic")
+    return t
+
+
+def transmission_type(t: str) -> str:
+    t = normalize_transmission(t)
+    if t == "unknown" or "not specified" in t:
+        return "unknown"
+    if "manual" in t:
+        return "manual"
+    if ("cvt" in t) or ("variable" in t) or ("ivt" in t) or ("ecvt" in t):
+        return "cvt"
+    return "automatic"
+
+
+def transmission_gears(t: str) -> float:
+    t = normalize_transmission(t)
+    match = re.search(r"(\d+)\s?speed", t)
+    return int(match.group(1)) if match else np.nan
+
+
+# ===============================
+# Color collapsing
+# ===============================
+
+def base_color(c: str) -> str:
+    c = str(c)
+    if "black" in c or "ebony" in c:
+        return "black"
+    if "blue" in c or "deep cerulean" in c:
+        return "blue"
+    if "red" in c or "scarlet ember" in c or "maroon" in c or "dark cherry" in c:
+        return "red"
+    if "green" in c or "army green" in c or "f8 green" in c or "dark moss" in c or "sarge green clearcoat" in c:
+        return "green"
+    if "white" in c or "pearl" in c or "whiite" in c:
+        return "white"
+    if "gray" in c or "silver" in c or "grey" in c or "gun" in c or "steel" in c or "magnetic" in c or " metal " in c or "carbon" in c or "granite" in c or "graphite" in c:
+        return "gray"
+    return "other"
+
+
+def interior_color_base(c: str) -> str:
+    c = str(c)
+    if "black" in c or "ebony" in c or "jet" in c:
+        return "black"
+    if "red" in c:
+        return "red"
+    if "gray" in c or "grey" in c or "graphite" in c or "charcoal" in c or "shale" in c or "steel" in c or "pewter" in c or "slate" in c:
+        return "gray"
+    if "brown" in c or "cappuccino" in c or "mocha" in c or "espresso" in c or "cocoa" in c or "coffee" in c or "nutmeg" in c or "walnut" in c or "chestnut" in c or "hazelnut" in c or "roast" in c:
+        return "brown"
+    if "beige" in c or "tan" in c or "taupe" in c or "sand" in c or "ash" in c or "camel" in c or "cognac" in c or "parchment" in c or "stone" in c or "wheat" in c or "sandstone" in c or "cement" in c or "almond" in c or "blond" in c or "neutral" in c:
+        return "beige"
+    if "white" in c or "ivory" in c or "cream" in c:
+        return "white"
+    return "other"
+
+
+# ===============================
+# Batch pipeline: build_cleaned_df
+# ===============================
 
 def build_cleaned_df(raw_csv_path) -> pd.DataFrame:
-    df_local = pd.read_csv(raw_csv_path)
+    """Load raw CSV, compute mpg_avg, drop nulls, cast binary flags,
+    normalize text columns, map drivetrain."""
 
+    df_local = pd.read_csv(raw_csv_path)
     df_cleaned = df_local.copy()
 
     mpg_split = df_cleaned["mpg"].astype(str).str.split("-", expand=True)
@@ -779,148 +960,53 @@ def build_cleaned_df(raw_csv_path) -> pd.DataFrame:
         if c in df_cleaned.columns:
             df_cleaned[c] = df_cleaned[c].round().astype("Int64")
 
+    for col in TEXT_COLUMNS:
+        df_cleaned[col] = normalize_text_basic(df_cleaned[col])
+
+    df_cleaned["drivetrain"] = df_cleaned["drivetrain"].replace(DRIVETRAIN_MAP)
+
     return df_cleaned
 
 
+# ===============================
+# Batch pipeline: build_features_df
+# ===============================
+
 def build_features_df(df_cleaned: pd.DataFrame) -> pd.DataFrame:
-    # start from cleaned df already in memory
+    """Transform cleaned dataframe into model-ready features + target."""
+
     y = np.log1p(df_cleaned["price"])
     X = df_cleaned.drop(columns=["price", "seller_name"], errors="ignore").copy()
 
-    REFERENCE_YEAR = 2023 #The dataset ends at the beginning of 2023
-
-    # age and mileage per year
+    # Age and mileage per year
     X["age"] = REFERENCE_YEAR - X["year"]
     X["age_for_mpy"] = X["age"].clip(lower=1)
     X["mileage_per_year"] = X["mileage"] / X["age_for_mpy"]
     X = X.drop(columns=["age_for_mpy", "year"])
 
-    def normalize_brand(s: str) -> str:
-        return (
-            str(s)
-            .strip()
-            .upper()
-            .replace("-", " ")
-        )
-
-    LUXURY_BRANDS = {
-        "ACURA", "ALFA ROMEO", "ASTON MARTIN", "AUDI", "BENTLEY", "BMW", "BUGATTI", "CADILLAC", "FERRARI", "GENESIS", "INFINITI", "JAGUAR", "LAMBORGHINI", "LAND ROVER", "LEXUS", "LINCOLN", "LOTUS", "MASERATI", "MCLAREN", "MERCEDES BENZ", "POLESTAR", "PORSCHE", "ROLLS-ROYCE", "TESLA", "VOLVO"
-    }
-
-    X["manufacturer_norm"] = X["manufacturer"].apply(normalize_brand)
-
-    X["is_luxury_brand"] = (
-        X["manufacturer_norm"].isin(LUXURY_BRANDS).astype("int64")
-    )
-
+    # Luxury brand flag + interaction
+    X["is_luxury_brand"] = X["manufacturer"].isin(LUXURY_BRANDS).astype("int64")
     X["luxury_age_interaction"] = X["is_luxury_brand"] * X["age"]
 
-    # Drop helper column
-    X = X.drop(columns=["manufacturer_norm"])
-
-    def parse_engine(engine):
-        s = str(engine).strip().upper()
-
-        m_l = re.search(r"(\d(?:\.\d)?)\s*L\b", s)
-        liters = float(m_l.group(1)) if m_l else np.nan
-
-        m_c = re.search(r"\b([IVH])\s*[- ]?\s*(\d+)\b", s)
-        if m_c:
-            layout = m_c.group(1)
-            cylinders = int(m_c.group(2))
-        else:
-            layout = np.nan
-            cylinders = np.nan
-
-        turbo = int(("TURBO" in s) or ("TWIN TURBO" in s) or ("SUPERCHARG" in s))
-
-        hybrid = int(
-            ("HYBRID" in s) or
-            ("GAS/ELECTRIC" in s) or
-            ("PHEV" in s) or
-            ("PLUG-IN" in s) or
-            ("ELECTRIC" in s and "GAS" in s)
-        )
-
-        return pd.Series({
-            "engine_liters": liters,
-            "engine_cylinders": cylinders,
-            "engine_layout": layout,
-            "engine_turbo": turbo,
-            "engine_hybrid": hybrid
-        })
-
+    # Parse engine
     engine_features = X["engine"].apply(parse_engine)
     X = pd.concat([X.drop(columns=["engine"]), engine_features], axis=1)
     X["engine_layout"] = X["engine_layout"].fillna("unknown")
 
-    def normalize_transmission(t):
-        if pd.isna(t):
-            return "unknown"
-        t = str(t).lower().strip()
-        t = t.replace("a/t", "automatic")
-        t = t.replace("auto", "automatic")
-        return t
-
-    def transmission_type(t):
-        t = normalize_transmission(t)
-        if t == "unknown" or "not specified" in t:
-            return "unknown"
-        if "manual" in t:
-            return "manual"
-        if ("cvt" in t) or ("variable" in t) or ("ivt" in t) or ("ecvt" in t):
-            return "cvt"
-        return "automatic"
-
-    def transmission_gears(t):
-        t = normalize_transmission(t)
-        match = re.search(r"(\d+)[-\s]?speed", t)
-        return int(match.group(1)) if match else np.nan
-
+    # Parse transmission
     X["transmission_clean"] = X["transmission"].apply(transmission_type)
     X["transmission_gears"] = X["transmission"].apply(transmission_gears)
     X = X.drop(columns=["transmission"])
     X["transmission_gears_missing"] = X["transmission_gears"].isna().astype(int)
 
-    def base_color(c):
-        c = str(c).lower().strip()
-        if "black" in c or "ebony" in c:
-            return "black"
-        if "blue" in c or "deep cerulean" in c:
-            return "blue"
-        if "red" in c or "scarlet ember" in c or "maroon" in c or "dark cherry" in c:
-            return "red"
-        if "green" in c or "army green" in c or "f8 green" in c or "dark moss" in c or "sarge green clearcoat" in c:
-            return "green"
-        if "white" in c or "pearl" in c or "whiite" in c:
-            return "white"
-        if "gray" in c or "silver" in c or "grey" in c or "gun" in c or "steel" in c or "magnetic" in c or " metal " in c or "carbon" in c or "granite" in c or "graphite" in c:
-            return "gray"
-        return "other"
-
+    # Collapse colors
     X["exterior_color_base"] = X["exterior_color"].apply(base_color)
     X = X.drop(columns=["exterior_color"])
-
-    def interior_color_base(c):
-        c = str(c).lower().strip()
-        if "black" in c or "ebony" in c or "jet" in c:
-            return "black"
-        if "red" in c:
-            return "red"
-        if "gray" in c or "grey" in c or "graphite" in c or "charcoal" in c or "shale" in c or "steel" in c or "pewter" in c or "slate" in c:
-            return "gray"
-        if "brown" in c or "cappuccino" in c or "mocha" in c or "espresso" in c or "cocoa" in c or "coffee" in c or "nutmeg" in c or "walnut" in c or "chestnut" in c or "hazelnut" in c or "roast" in c:
-            return "brown"
-        if "beige" in c or "tan" in c or "taupe" in c or "sand" in c or "ash" in c or "camel" in c or "cognac" in c or "parchment" in c or "stone" in c or "wheat" in c or "sandstone" in c or "cement" in c or "almond" in c or "blond" in c or "neutral" in c:
-            return "beige"
-        if "white" in c or "ivory" in c or "cream" in c:
-            return "white"
-        return "other"
 
     X["interior_color_base"] = X["interior_color"].apply(interior_color_base)
     X = X.drop(columns=["interior_color"])
 
-    # casts
+    # Type casts
     numeric_casts = {
         "age": "int64",
         "mileage_per_year": "float64",
@@ -939,10 +1025,125 @@ def build_features_df(df_cleaned: pd.DataFrame) -> pd.DataFrame:
         if col in X.columns:
             X[col] = X[col].astype("object")
 
-    # Save X and y 
     features_df = X.copy()
     features_df["target_log1p_price"] = y.values
     return features_df
+
+
+# ===============================
+# API inference: prepare_for_prediction
+# ===============================
+
+def prepare_for_prediction(
+    raw_input: dict,
+    feature_columns: list[str],
+) -> pd.DataFrame:
+    """Transform a single raw API input dict into a feature DataFrame
+    matching the training schema.
+
+    Parameters
+    ----------
+    raw_input : dict
+        Raw vehicle attributes from the API request. Expected keys:
+        manufacturer, model, year, mileage, engine, transmission,
+        drivetrain, fuel_type, exterior_color, interior_color,
+        mpg (string like "30-32" or numeric), price_drop,
+        seller_rating, driver_rating, driver_reviews_num,
+        accidents_or_damage, one_owner, personal_use_only
+    feature_columns : list[str]
+        Ordered list of feature column names from training.
+        Used to ensure the output matches the model's expected schema.
+
+    Returns
+    -------
+    pd.DataFrame
+        Single-row DataFrame with columns in feature_columns order,
+        ready for model.predict().
+    """
+    df = pd.DataFrame([raw_input])
+
+    # --- MPG: handle "30-32" string or plain numeric ---
+    if "mpg" in df.columns:
+        mpg_split = df["mpg"].astype(str).str.split("-", expand=True)
+        df["mpg_avg"] = (
+            mpg_split
+            .apply(pd.to_numeric, errors="coerce")
+            .mean(axis=1)
+        )
+        df = df.drop(columns=["mpg"])
+
+    # --- Binary flags ---
+    bin_cols = ["accidents_or_damage", "one_owner", "personal_use_only"]
+    for c in bin_cols:
+        if c in df.columns:
+            df[c] = pd.to_numeric(df[c], errors="coerce").round().astype("Int64")
+
+    # --- Normalize text ---
+    for col in TEXT_COLUMNS:
+        if col in df.columns:
+            df[col] = df[col].astype(str).apply(normalize_text_single)
+
+    # --- Drivetrain mapping ---
+    if "drivetrain" in df.columns:
+        df["drivetrain"] = df["drivetrain"].replace(DRIVETRAIN_MAP)
+
+    # --- Drop seller_name if present ---
+    df = df.drop(columns=["seller_name"], errors="ignore")
+
+    # --- Age and mileage per year ---
+    df["age"] = REFERENCE_YEAR - df["year"].astype(int)
+    age_for_mpy = df["age"].clip(lower=1)
+    df["mileage_per_year"] = df["mileage"].astype(float) / age_for_mpy
+    df = df.drop(columns=["year"], errors="ignore")
+
+    # --- Luxury brand flag + interaction ---
+    df["is_luxury_brand"] = df["manufacturer"].isin(LUXURY_BRANDS).astype("int64")
+    df["luxury_age_interaction"] = df["is_luxury_brand"] * df["age"]
+
+    # --- Parse engine ---
+    engine_parsed = parse_engine(df["engine"].iloc[0])
+    df[engine_parsed.index] = engine_parsed.values
+    
+    df = df.drop(columns=["engine"])
+    df["engine_layout"] = df["engine_layout"].fillna("unknown")
+
+    # --- Parse transmission ---
+    trans_val = df["transmission"].iloc[0]
+    df["transmission_clean"] = transmission_type(trans_val)
+    df["transmission_gears"] = transmission_gears(trans_val)
+    df = df.drop(columns=["transmission"])
+    df["transmission_gears_missing"] = int(pd.isna(df["transmission_gears"].iloc[0]))
+
+    # --- Collapse colors ---
+    df["exterior_color_base"] = base_color(df["exterior_color"].iloc[0])
+    df = df.drop(columns=["exterior_color"])
+
+    df["interior_color_base"] = interior_color_base(df["interior_color"].iloc[0])
+    df = df.drop(columns=["interior_color"])
+
+    # --- Type casts ---
+    numeric_casts = {
+        "age": "int64",
+        "mileage_per_year": "float64",
+        "engine_liters": "float64",
+        "engine_cylinders": "float64",
+        "transmission_gears": "float64",
+        "engine_turbo": "int64",
+        "engine_hybrid": "int64",
+        "transmission_gears_missing": "int64",
+    }
+    for col, dtype in numeric_casts.items():
+        if col in df.columns:
+            df[col] = df[col].astype(dtype)
+
+    for col in ["engine_layout", "transmission_clean", "exterior_color_base", "interior_color_base"]:
+        if col in df.columns:
+            df[col] = df[col].astype("object")
+
+    # --- Reorder columns to match training schema ---
+    df = df[feature_columns]
+
+    return df
 '''
 
 PIPELINE_PY.write_text(pipeline_code, encoding="utf-8");
@@ -992,6 +1193,31 @@ display(df_raw.head())
 The cleaning function computes `mpg_avg`, drops incomplete rows, and casts binary flags to integers. Results are cached as a Parquet checkpoint.
 ```{python}
 #| code-summary: "Cleaning function: compute mpg_avg, drop nulls, cast binary flags"
+
+def normalize_text_basic(s: pd.Series) -> pd.Series:
+    """Normalize a pandas Series of strings: lowercase, strip,
+    replace hyphens/slashes with spaces, pad &, collapse whitespace."""
+    return (
+        s.astype(str)
+         .str.strip()
+         .str.lower()
+         .str.replace(r'[-/]', ' ', regex=True)   # hyphens & slashes → space
+         .str.replace(r'&', ' & ', regex=False)   # pad & so "x&y" → "x & y"
+         .str.replace(r'\s+', ' ', regex=True)    # collapse runs of whitespace
+         .str.strip()                             # trim again after replacements
+    )
+
+DRIVETRAIN_MAP = {
+    "all wheel drive": "awd",
+    "awd":             "awd",
+    "four wheel drive": "4wd",
+    "4wd":              "4wd",
+    "front wheel drive": "fwd",
+    "fwd":               "fwd",
+    "rear wheel drive":  "rwd",
+    "rwd":               "rwd",
+}
+
 def build_cleaned_df():
     df_local = pd.read_csv(RAW_CSV)
 
@@ -1020,6 +1246,15 @@ def build_cleaned_df():
     for c in bin_cols:
         if c in df_cleaned.columns:
             df_cleaned[c] = df_cleaned[c].round().astype("Int64")
+
+    TEXT_COLUMNS = [
+    "manufacturer", "model", "drivetrain", "fuel_type",
+    "engine", "transmission", "exterior_color", "interior_color"]
+
+    for col in TEXT_COLUMNS:
+        df_cleaned[col] = normalize_text_basic(df_cleaned[col])
+
+    df_cleaned["drivetrain"] = df_cleaned["drivetrain"].replace(DRIVETRAIN_MAP)
 
     return df_cleaned
 
@@ -1226,9 +1461,9 @@ Several patterns in the exploratory analysis directly informed modeling decision
 
 **Luxury brands have higher price variance.** The box plot of price by manufacturer (clipped to 1–99%) shows that Porsche, Land Rover, and Mercedes-Benz have substantially wider interquartile ranges than mass-market brands. This motivated the `is_luxury_brand` flag and the `luxury_age_interaction` feature, allowing models to learn separate depreciation curves for luxury vs. non-luxury vehicles.
 
-**Several text columns have very high cardinality.** Exterior color (4,172 unique values), interior color (2,115), engine (1,818), and transmission (255) are all free-text fields with OEM-specific naming conventions. These require structured extraction and consolidation before modeling — addressed in the [Feature Engineering](#feature-engineering) section below.
+**Several text columns have very high cardinality.** Exterior color (4,040 unique values), interior color (1,855), engine (1,808), and transmission (221) are all free-text fields with OEM-specific naming conventions. These require structured extraction and consolidation before modeling — addressed in the [Feature Engineering](#feature-engineering) section below.
 
-**Model count varies widely by manufacturer.** Volkswagen and Toyota each have 350+ unique model names, while Chrysler has fewer than 100. Combined with the 5,680 unique model values across all manufacturers, this high cardinality is one reason CatBoost's native categorical handling outperforms Ridge's one-hot encoding approach.
+**Model count varies widely by manufacturer.** Volkswagen and Toyota each have 350+ unique model names, while Chrysler has fewer than 100. Combined with the 5,613 unique model values across all manufacturers, this high cardinality is one reason CatBoost's native categorical handling outperforms Ridge's one-hot encoding approach.
 
 ### Feature Engineering
 
@@ -1238,13 +1473,13 @@ The `seller_name` column was dropped entirely — with thousands of unique selle
 
 #### Engine Parsing
 
-The raw `engine` column is a free-text field with inconsistent formatting (e.g., "2.0L I4 Turbo", "V8 Flex Fuel", "3.6L V6 24V MPFI DOHC"). Rather than one-hot encoding 1,818 unique strings, I extracted five structured features: displacement (liters), cylinder count, engine layout (I/V/H), forced induction (turbo/supercharged), and hybrid status.
+The raw `engine` column is a free-text field with inconsistent formatting (e.g., "2.0L I4 Turbo", "V8 Flex Fuel", "3.6L V6 24V MPFI DOHC"). Rather than one-hot encoding 1,808 unique strings, I extracted five structured features: displacement (liters), cylinder count, engine layout (I/V/H), forced induction (turbo/supercharged), and hybrid status.
 
 Missing engine attributes arose from heterogeneous text formats rather than data loss — this is structured missingness due to information compression, not sensor failure. I preserved those rows and handled partial observability by median imputation for numeric attributes and by explicitly writing “unknown” for categories with nominal attributes.
 
 #### Transmission Normalization
 
-Transmission descriptions contained extensive brand-specific and marketing terminology (255 unique values). I normalized these into transmission type (manual/automatic/CVT) and gear count, which preserved predictive signal while dramatically reducing feature dimensionality.
+Transmission descriptions contained extensive brand-specific and marketing terminology (221 unique values). I normalized these into transmission type (manual/automatic/CVT) and gear count, which preserved predictive signal while dramatically reducing feature dimensionality.
 
 Because gear counts were missing for a substantial fraction of automatic transmissions, I retained the feature and added an explicit missingness indicator (`transmission_gears_missing`), allowing the models to learn separate effects for known and unspecified gear counts.
 
@@ -1288,32 +1523,20 @@ def build_features_df():
     X["mileage_per_year"] = X["mileage"] / X["age_for_mpy"]
     X = X.drop(columns=["age_for_mpy", "year"])
 
-    def normalize_brand(s: str) -> str:
-        return (
-            str(s)
-            .strip()
-            .upper()
-            .replace("-", " ")
-        )
-
     # Luxury brands tend to hold value differently (higher base price,
     # steeper or shallower depreciation). The binary flag and its
     # interaction with age, let the model learn separate depreciation
     # curves for luxury vs. non-luxury vehicles.
+
     LUXURY_BRANDS = {
-        "ACURA", "ALFA ROMEO", "ASTON MARTIN", "AUDI", "BENTLEY", "BMW", "BUGATTI", "CADILLAC", "FERRARI", "GENESIS", "INFINITI", "JAGUAR", "LAMBORGHINI", "LAND ROVER", "LEXUS", "LINCOLN", "LOTUS", "MASERATI", "MCLAREN", "MERCEDES BENZ", "POLESTAR", "PORSCHE", "ROLLS-ROYCE", "TESLA", "VOLVO"
+        "acura", "alfa romeo", "aston martin", "audi", "bentley", "bmw", "bugatti", "cadillac", "ferrari", "genesis", "infiniti", "jaguar", "lamborghini", "land rover", "lexus", "lincoln", "lotus", "maserati", "mclaren", "mercedes benz", "polestar", "porsche", "rolls royce", "tesla", "volvo"
     }
 
-    X["manufacturer_norm"] = X["manufacturer"].apply(normalize_brand)
-
     X["is_luxury_brand"] = (
-        X["manufacturer_norm"].isin(LUXURY_BRANDS).astype("int64")
+        X["manufacturer"].isin(LUXURY_BRANDS).astype("int64")
     )
 
     X["luxury_age_interaction"] = X["is_luxury_brand"] * X["age"]
-
-    # Drop helper column
-    X = X.drop(columns=["manufacturer_norm"])
 
     # The raw 'engine' column is a free-text field with inconsistent
     # formatting (e.g., "2.0L I4 Turbo", "V8 Flex Fuel", "3.6L V6 24V").
@@ -1321,12 +1544,12 @@ def build_features_df():
     # (displacement, cylinder count, layout, forced induction, hybrid
     # status) to replace the high-cardinality raw string.
     def parse_engine(engine):
-        s = str(engine).strip().upper()
+        s = str(engine)
 
-        m_l = re.search(r"(\d(?:\.\d)?)\s*L\b", s)
+        m_l = re.search(r"(\d(?:\.\d)?)\s*l\b", s)
         liters = float(m_l.group(1)) if m_l else np.nan
 
-        m_c = re.search(r"\b([IVH])\s*[- ]?\s*(\d+)\b", s)
+        m_c = re.search(r"\b([ivh])\s*(\d+)\b", s)
         if m_c:
             layout = m_c.group(1)
             cylinders = int(m_c.group(2))
@@ -1334,14 +1557,14 @@ def build_features_df():
             layout = np.nan
             cylinders = np.nan
 
-        turbo = int(("TURBO" in s) or ("TWIN TURBO" in s) or ("SUPERCHARG" in s))
+        turbo = int(("turbo" in s) or ("twin turbo" in s) or ("supercharg" in s))
 
         hybrid = int(
-            ("HYBRID" in s) or
-            ("GAS/ELECTRIC" in s) or
-            ("PHEV" in s) or
-            ("PLUG-IN" in s) or
-            ("ELECTRIC" in s and "GAS" in s)
+            ("hybrid" in s) or
+            ("gas electric" in s) or 
+            ("phev" in s) or
+            ("plug in" in s) or
+            ("electric" in s and "gas" in s)
         )
 
         return pd.Series({
@@ -1359,8 +1582,8 @@ def build_features_df():
     def normalize_transmission(t):
         if pd.isna(t):
             return "unknown"
-        t = str(t).lower().strip()
-        t = t.replace("a/t", "automatic")
+        t = str(t)
+        t = t.replace("a t", "automatic")
         t = t.replace("auto", "automatic")
         return t
 
@@ -1376,7 +1599,7 @@ def build_features_df():
 
     def transmission_gears(t):
         t = normalize_transmission(t)
-        match = re.search(r"(\d+)[-\s]?speed", t)
+        match = re.search(r"(\d+)\s?speed", t)
         return int(match.group(1)) if match else np.nan
 
     X["transmission_clean"] = X["transmission"].apply(transmission_type)
@@ -1391,7 +1614,7 @@ def build_features_df():
     # (e.g. white/black/gray dominate resale volume; unusual colors may
     # carry a premium or penalty).
     def base_color(c):
-        c = str(c).lower().strip()
+        c = str(c)
         if "black" in c or "ebony" in c:
             return "black"
         if "blue" in c or "deep cerulean" in c:
@@ -1413,7 +1636,7 @@ def build_features_df():
     # Leather", "Sandstone") into 7 base groups. Interior color has a
     # weaker price signal than exterior but still captures preferences.
     def interior_color_base(c):
-        c = str(c).lower().strip()
+        c = str(c)
         if "black" in c or "ebony" in c or "jet" in c:
             return "black"
         if "red" in c:
@@ -1614,6 +1837,126 @@ print("Shared numeric cols:", len(num_cols), num_cols)
 print("Shared categorical cols:", len(cat_cols), cat_cols)
 print("Keras numeric cols:", len(num_cols_nn), num_cols_nn)
 print("Keras categorical cols:", len(cat_cols_nn), cat_cols_nn)
+```
+
+#### Export Vocabularies and Model Metadata
+
+Part 2 of this project builds a FastAPI prediction endpoint around the best model from Part 1 (Catboost). To ensure consistent preprocessing and validation, the notebook exports three reference artifacts to `models/api_artifacts/`: (1) categorical vocabularies containing known values for each categorical feature, (2) numeric medians for imputing missing optional fields, and (3) a model metadata file. The model metadata file records the feature column order, clip bounds, drivetrain mapping, luxury brand list, and pipeline version. These artifacts are loaded once at API startup so that no training-time information is hardcoded in the serving layer.
+
+```{python}
+# ===============================================================
+# Export vocabularies and model metadata
+# ===============================================================
+# These artifacts give the API everything it needs to validate
+# incoming requests and reconstruct features at inference time.
+# ===============================================================
+
+API_ARTIFACTS_DIR = MODEL_DIR / "api_artifacts"
+API_ARTIFACTS_DIR.mkdir(parents=True, exist_ok=True)
+
+# ---------------------------------------------------------------
+# 1. Categorical vocabularies — known values from training data
+# ---------------------------------------------------------------
+# Used by the API to validate incoming categorical values and
+# reject or fuzzy-match unknown inputs before they reach the model.
+
+cat_vocabs = {}
+for col in cat_cols:
+    cat_vocabs[col] = sorted(X_train[col].dropna().unique().tolist())
+
+atomic_write_json(
+    API_ARTIFACTS_DIR / "categorical_vocabularies.json",
+    cat_vocabs,
+)
+print(f"✅ Saved categorical vocabularies ({len(cat_vocabs)} columns)")
+for col, vals in cat_vocabs.items():
+    print(f"   {col}: {len(vals)} unique values")
+
+# ---------------------------------------------------------------
+# 1b. Models by manufacturer — for conditional validation
+# ---------------------------------------------------------------
+# Allows the API to validate that a given model is valid for the
+# specified manufacturer (e.g., reject manufacturer=toyota, model=civic).
+
+models_by_manufacturer = (
+    X_train[["manufacturer", "model"]]
+    .drop_duplicates()
+    .sort_values(["manufacturer", "model"])
+    .groupby("manufacturer")["model"]
+    .apply(list)
+    .to_dict()
+)
+
+atomic_write_json(
+    API_ARTIFACTS_DIR / "models_by_manufacturer.json",
+    models_by_manufacturer,
+)
+print(f"✅ Saved models_by_manufacturer ({len(models_by_manufacturer)} manufacturers)")
+
+# ---------------------------------------------------------------
+# 2. Numeric medians from training data — for imputation
+# ---------------------------------------------------------------
+# At inference, if optional numeric fields are missing, the API
+# can fill them with the training median (same strategy the
+# models use internally).
+
+numeric_medians = {}
+for col in num_cols:
+    median_val = X_train[col].median()
+    numeric_medians[col] = None if pd.isna(median_val) else float(median_val)
+
+atomic_write_json(
+    API_ARTIFACTS_DIR / "numeric_medians.json",
+    numeric_medians,
+)
+print(f"✅ Saved numeric medians ({len(numeric_medians)} features)")
+
+# ---------------------------------------------------------------
+# 3. Model metadata — everything the API needs to load and use
+#    the model correctly
+# ---------------------------------------------------------------
+
+model_metadata = {
+    "feature_pipeline_version": FEATURE_PIPELINE_VERSION,
+    "reference_year": 2023,
+    "feature_columns": list(X_train.columns),
+    "numeric_features": list(num_cols),
+    "categorical_features": list(cat_cols),
+    "clip_bounds": {
+        "q_low": 0.01,
+        "q_high": 0.99,
+        "clip_lo": float(CLIP_LO),
+        "clip_hi": float(CLIP_HI),
+    },
+    "drivetrain_map": {
+        "all wheel drive": "awd",
+        "awd":             "awd",
+        "four wheel drive": "4wd",
+        "4wd":              "4wd",
+        "front wheel drive": "fwd",
+        "fwd":               "fwd",
+        "rear wheel drive":  "rwd",
+        "rwd":               "rwd",
+    },
+    "luxury_brands": sorted(list({
+        "acura", "alfa romeo", "aston martin", "audi", "bentley",
+        "bmw", "bugatti", "cadillac", "ferrari", "genesis",
+        "infiniti", "jaguar", "lamborghini", "land rover", "lexus",
+        "lincoln", "lotus", "maserati", "mclaren", "mercedes benz",
+        "polestar", "porsche", "rolls royce", "tesla", "volvo",
+    })),
+    "target_transform": "log1p",
+    "inverse_transform": "expm1",
+}
+
+atomic_write_json(
+    API_ARTIFACTS_DIR / "model_metadata.json",
+    model_metadata,
+)
+print(f"✅ Saved model_metadata.json")
+print(f"   Feature columns: {len(model_metadata['feature_columns'])}")
+print(f"   Clip bounds: ${model_metadata['clip_bounds']['clip_lo']:,.0f} – ${model_metadata['clip_bounds']['clip_hi']:,.0f}")
+print(f"📁 All API artifacts: {API_ARTIFACTS_DIR}")
 ```
 
 #### Evaluation Functions
@@ -1935,9 +2278,9 @@ else:
 
 #### Ridge Interpretation
 
-The Ridge regression achieved a test MAE of ~$3,013 and a test RMSE of ~$7,827, serving as a linear baseline. The gap between MAE and RMSE indicates that while typical pricing errors are modest (~$1,758 median absolute error), a few high-value or atypical vehicles contribute disproportionately to total error.
+The Ridge regression achieved a test MAE of ~$3,011 and a test RMSE of ~$7,824, serving as a linear baseline. The gap between MAE and RMSE indicates that while typical pricing errors are modest (~$1,759 median absolute error), a few high-value or atypical vehicles contribute disproportionately to total error.
 
-When clipped to the 1–99% price range ($7k–$91k), Ridge's RMSE drops to $4,214 — nearly half the full-distribution value. This confirms that the linear model handles the bulk of the market well but struggles with rare luxury vehicles, where pricing is driven by factors not well captured by additive features.
+When clipped to the 1–99% price range ($7k–$91k), Ridge's RMSE drops to $4,211 — nearly half the full-distribution value. This confirms that the linear model handles the bulk of the market well but struggles with rare luxury vehicles, where pricing is driven by factors not well captured by additive features.
 
 The Ridge model used 991 total features (19 numeric + 972 one-hot encoded categorical dummies). This high dimensionality from one-hot encoding is one reason tree-based models, which handle categories natively, have an architectural advantage on this dataset.
 
@@ -2675,7 +3018,7 @@ CatBoost is the **selected final model** for this project, achieving the best pe
 
 **Training process**: Hyperparameters were selected using the training split with cross-validation via a staged grid search to balance performance and computational cost. A validation split was then used for early stopping to automatically select the optimal ensemble size. After model selection was finalized, the final model was refit on the combined train+validation data and evaluated on the held-out test set.
 
-**Performance**: CatBoost cuts Ridge's test MAE roughly in half ($1,912 vs. $3,013) and reduces RMSE by nearly 50% ($3,940 vs. $7,827). The clipped test RMSE of $2,659 means that for the vast majority of vehicles, predictions are within ~$2,700 of the actual price — well within the normal range of market variability for used cars.
+**Performance**: CatBoost cuts Ridge's test MAE roughly in half ($1,916 vs. $3,011) and reduces RMSE by nearly 50% ($3,935 vs. $7,824). The clipped test RMSE of $2,665 means that for the vast majority of vehicles, predictions are within ~$2,700 of the actual price — well within the normal range of market variability for used cars.
 
 **Feature importance highlights**: CatBoost's built-in feature importance reveals that `age` (19.0%) and `mileage` (14.3%) are the dominant predictors, followed by `model` (11.0%) and `manufacturer` (9.4%). This aligns with domain knowledge — depreciation (age + mileage) is the primary driver of used-car pricing, while make and model capture brand and segment effects.
 
@@ -4627,7 +4970,7 @@ The FT-Transformer was included as evidence of advanced experimentation with dee
 
 **Architecture**: The model uses learned embeddings for each categorical feature and a Transformer-style attention mechanism to capture feature interactions. This is a more modern approach than simple dense networks for tabular data.
 
-**Performance**: The FT-Transformer achieved competitive results — its clipped test MAE ($1,803) is within $20 of CatBoost ($1,783), showing that it learned meaningful representations. However, its full-distribution RMSE ($4,193) is ~6% higher than CatBoost's ($3,940), indicating greater sensitivity to rare, high-price vehicles.
+**Performance**: The FT-Transformer achieved competitive results — its clipped test MAE ($1,800) is within $20 of CatBoost ($1,782), showing that it learned meaningful representations. However, its full-distribution RMSE ($4,255) is ~8% higher than CatBoost's ($3,935), indicating greater sensitivity to rare, high-price vehicles.
 
 **Permutation importance**: The permutation-based feature importance largely agrees with CatBoost's rankings — `model` (25.0%), `manufacturer` (14.4%), `mileage` (14.1%), and `age` (12.0%) are the top features. The consistency across model families suggests these are genuinely the most informative features rather than artifacts of a particular algorithm.
 
@@ -5155,13 +5498,13 @@ else:
 
 ### Final Model Selection
 
-CatBoost is confirmed as the final model. As detailed in the [Project Background](#project-background), it achieved the lowest error across every metric while also being the most practical to tune and maintain. For a typical used car in the $7k–$91k range, its predictions fall within ~$1,266 of the actual price at the median.
+CatBoost is confirmed as the final model. As detailed in the [Project Background](#project-background), it achieved the lowest error across every metric while also being the most practical to tune and maintain. For a typical used car in the $7k–$91k range, its predictions fall within ~$1,267 of the actual price at the median.
 
 ### Key Takeaways
 
-1. **Feature engineering was essential across all model classes.** Collapsing 1,818 raw engine strings into five structured features, normalizing 255 transmission variants by type and gear count, and engineering domain-informed features such as luxury-brand depreciation interactions gave all three models a clean, informative feature set. Even CatBoost, which handles categorical features natively, relied heavily on these engineered features — age, mileage, and the parsed engine attributes — all of which ranked among its top predictors.
+1. **Feature engineering was essential across all model classes.** Collapsing 1,808 raw engine strings into five structured features, normalizing 221 transmission variants by type and gear count, and engineering domain-informed features such as luxury-brand depreciation interactions gave all three models a clean, informative feature set. Even CatBoost, which handles categorical features natively, relied heavily on these engineered features — age, mileage, and the parsed engine attributes — all of which ranked among its top predictors.
 
-2. **CatBoost's categorical handling is a structural advantage.** Ridge required 972 one-hot encoded dummy columns to represent 8 categorical features, inflating the feature space to 991 total dimensions. CatBoost handled the same categories natively — including 5,680 unique models — without one-hot encoding and outperformed Ridge by ~50% across all metrics. This suggests that on high-cardinality tabular data, the model's ability to handle categories efficiently matters as much as the underlying algorithm.
+2. **CatBoost's categorical handling is a structural advantage.** Ridge required 972 one-hot encoded dummy columns to represent 8 categorical features, inflating the feature space to 991 total dimensions. CatBoost handled the same categories natively — including 5,613 unique models — without one-hot encoding and outperformed Ridge by ~50% across all metrics. This suggests that on high-cardinality tabular data, the model's ability to handle categories efficiently matters as much as the underlying algorithm.
 
 3. **Luxury vehicles are the hardest to price accurately.** All three models show increasing absolute error for vehicles above ~$100k, and the largest residuals are consistently observed for high-value luxury listings. This is likely because luxury pricing depends on factors not captured in the dataset — trim-level distinctions, option packages, condition details, and collector-market dynamics — that matter far more for a $400k Porsche than a $25k Toyota. The consistency of this pattern across Ridge, CatBoost, and the FT-Transformer suggests it reflects a limitation of the available features rather than any particular model's weakness.
 
@@ -5178,8 +5521,8 @@ CatBoost is confirmed as the final model. As detailed in the [Project Background
 
 ## Conclusion
 
-This project demonstrates that careful feature engineering combined with a well-suited model architecture can produce used-car price predictions accurate enough for real business use — within ~$1,300 of the true price for typical vehicles, across a dataset spanning 29 manufacturers and 5,680 model variants.
+This project demonstrates that careful feature engineering combined with a well-suited model architecture can produce used-car price predictions accurate enough for real business use — within ~$1,300 of the true price for typical vehicles, across a dataset spanning 29 manufacturers and 5,613 model variants.
 
-The progression from Ridge to CatBoost to the FT-Transformer revealed that understanding the data was essential: collapsing 1,818 raw engine strings into five structured features, normalizing 255 transmission variants into type and gear count, and engineering domain-informed features like luxury-brand depreciation interactions gave all three models a strong foundation. CatBoost captured these patterns most reliably, and its practical advantages in training speed, tuning stability, and categorical handling make it the right choice for production.
+The progression from Ridge to CatBoost to the FT-Transformer revealed that understanding the data was essential: collapsing 1,808 raw engine strings into five structured features, normalizing 221 transmission variants into type and gear count, and engineering domain-informed features like luxury-brand depreciation interactions gave all three models a strong foundation. CatBoost captured these patterns most reliably, and its practical advantages in training speed, tuning stability, and categorical handling make it the right choice for production.
 
 The FT-Transformer's competitive performance confirms that deep learning can learn meaningful structure from tabular data, but on this problem, it did not justify the additional engineering and tuning cost. That may change as architectures and training recipes for tabular Transformers continue to mature.
