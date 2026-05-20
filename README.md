@@ -3,7 +3,7 @@
 **Ridge → CatBoost → FT-Transformer** · Predicting used-car listing prices from structured vehicle attributes
 
 **Author:** Erin Weiss
-[Portfolio](link) | [LinkedIn](link) | [GitHub](link)
+[Portfolio](https://erin-weiss.github.io/index.html) | [LinkedIn](https://www.linkedin.com/in/erinweiss3/) | [GitHub](https://github.com/Erin-Weiss)
 
 [![Python](https://img.shields.io/badge/Python-3.10+-3776AB?logo=python&logoColor=white)](https://python.org)
 [![scikit-learn](https://img.shields.io/badge/scikit--learn-1.x-F7931E?logo=scikit-learn&logoColor=white)](https://scikit-learn.org)
@@ -11,7 +11,7 @@
 [![TensorFlow](https://img.shields.io/badge/TensorFlow-Keras-FF6F00?logo=tensorflow&logoColor=white)](https://www.tensorflow.org)
 [![Quarto](https://img.shields.io/badge/Quarto-Notebook-75AADB)](https://quarto.org)
 
-[View the Full Interactive Report](link-to-github-page) | [Live GitHub Page](link-to-github-page)
+[View the Full Interactive Report](https://erin-weiss.github.io/articles/Used-Car-Price.html) | [Live GitHub Page](link-to-github-page)
 
 ---
 
@@ -122,7 +122,7 @@ The project uses a lightweight experiment management system designed for full re
  
 † Generated locally — not checked into version control. 
 ```
-See the [full analysis notebook](link-to-portfolio-page) for a complete listing of generated files.
+See the [full analysis notebook](https://erin-weiss.github.io/articles/Used-Car-Price.html) for a complete listing of generated files.
 
 ---
 
@@ -195,10 +195,9 @@ Together, the two repositories demonstrate the full ML lifecycle: data engineeri
 
 ## Author
 
-**Erin Weiss** · [Portfolio](link) · [LinkedIn](link) · [GitHub](link)
+**Erin Weiss** · [Portfolio](https://erin-weiss.github.io/index.html) · [LinkedIn](https://www.linkedin.com/in/erinweiss3/) · [GitHub](https://github.com/Erin-Weiss)
 
 - [Live Notebook](link-to-github-page) — Full rendered analysis with interactive code
-- [Source Code](link-to-repo) — GitHub repository
 
 ---
 
