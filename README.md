@@ -2,22 +2,26 @@
 
 **Ridge → CatBoost → FT-Transformer** · Predicting used-car listing prices from structured vehicle attributes
 
+**Author:** Erin Weiss
+[Portfolio](link) | [LinkedIn](link) | [GitHub](link)
+
 [![Python](https://img.shields.io/badge/Python-3.10+-3776AB?logo=python&logoColor=white)](https://python.org)
 [![scikit-learn](https://img.shields.io/badge/scikit--learn-1.x-F7931E?logo=scikit-learn&logoColor=white)](https://scikit-learn.org)
 [![CatBoost](https://img.shields.io/badge/CatBoost-FFCC00?logo=catboost&logoColor=black)](https://catboost.ai)
 [![TensorFlow](https://img.shields.io/badge/TensorFlow-Keras-FF6F00?logo=tensorflow&logoColor=white)](https://www.tensorflow.org)
 [![Quarto](https://img.shields.io/badge/Quarto-Notebook-75AADB)](https://quarto.org)
 
-[View the full analysis →](link-to-github-page)
+[View the Full Interactive Report](link-to-github-page) | [Live GitHub Page](link-to-github-page)
 
 ---
 
 ## Overview
 
-This project predicts used-car listing prices from 20 vehicle attributes using three progressively complex modeling approaches — Linear baseline establishing a performance 
-floor from an interpretable linear baseline through gradient-boosted trees to a deep learning transformer. The goal is not simply to minimize error, but to evaluate the practical tradeoffs between interpretability, feature engineering effort, and predictive performance on real-world tabular data.
+This project predicts used-car listing prices from 20 vehicle attributes using three progressively complex modeling approaches — from an interpretable linear baseline through gradient-boosted trees to a deep learning transformer. The goal is not simply to minimize error, but to evaluate the practical tradeoffs between interpretability, feature engineering effort, and predictive performance on real-world tabular data.
 
 **The final model (CatBoost) predicts within ~$1,300 of the true listing price at the median**, across 29 manufacturers and 5,613 model variants — accurate enough to automate first-pass pricing, reduce manual appraisals, and surface arbitrage opportunities for dealerships, online marketplaces, and auto lenders.
+
+---
 
 ## Results
 
@@ -32,9 +36,13 @@ floor from an interpretable linear baseline through gradient-boosted trees to a 
 
 CatBoost outperforms Ridge by ~50% on every metric and edges out the FT-Transformer by a meaningful margin, particularly on full-distribution RMSE where sensitivity to rare high-value vehicles amplifies differences.
 
+---
+
 ## Business Context
 
 Used-car pricing is a high-stakes, high-volume problem. Dealerships, online marketplaces, and lenders need fast, accurate price estimates to set competitive listing prices, flag underpriced inventory for acquisition, detect overpriced listings, and underwrite auto loans. A model predicting within ~$1,300 at the median is accurate enough to drive real operational decisions across portfolios of thousands of vehicles.
+
+---
 
 ## Key Findings
 
@@ -45,6 +53,8 @@ Used-car pricing is a high-stakes, high-volume problem. Dealerships, online mark
 **Deep learning is competitive but not dominant on tabular data.** The FT-Transformer came within ~$20 of CatBoost on clipped MAE, confirming that learned embeddings capture meaningful structure. But CatBoost's lower tuning burden, built-in regularization, and robustness across the full price range make it the practical production choice.
 
 **Luxury vehicles are the hardest to price accurately.** All three models show increasing error above ~$100k, likely because luxury pricing depends on factors not in the dataset — trim levels, option packages, and collector-market dynamics.
+
+---
 
 ## Technical Approach
 
@@ -64,13 +74,14 @@ Raw listing fields were transformed into a clean, model-ready feature set:
 ### Models
 
 - **Ridge Regression** — Linear baseline establishing a performance floor. Quantifies how far a simple additive model can go on the engineered feature set.
-
 - **CatBoost** — Gradient-boosted trees with native categorical feature handling. Selected as the **final model** based on superior generalization across all metrics.
 - **FT-Transformer (Keras)** — Feature Tokenizer + Transformer architecture with learned categorical embeddings. Demonstrates advanced experimentation with deep learning on tabular data.
 
 ### Evaluation Methodology
 
 Because used-car prices are highly skewed (median ~$27k, tail past $100k reaching $1.9M), metrics are reported in two views: **full distribution** (reflecting real-world performance including rare luxury vehicles) and **clipped 1–99%** (reflecting typical consumer vehicles). The gap between the two (e.g., $3,935 vs. $2,665 RMSE for CatBoost) quantifies the impact of tail observations.
+
+---
 
 ## Reproducibility
 
@@ -81,35 +92,39 @@ The project uses a lightweight experiment management system designed for full re
 - **Schema validation**: Loading a saved model validates that the current feature pipeline matches the schema used during training, preventing accidental evaluation against incompatible features.
 - **Training control flags**: `TRAIN_MODE` (smoke/full/skip) and per-model `RETRAIN_*` flags allow fast iteration without overwriting production artifacts.
 
-## Project Structure
+---
 
+## Project Structure
+ 
 ```
 ├── data/
-│   ├── raw/                    # Raw dataset (auto-downloaded via Kaggle CLI)
-│   └── processed/              # Versioned Parquet files and split indices
+│   ├── raw/                    # Raw dataset (auto-downloaded via Kaggle CLI) †
+│   └── processed/              # Versioned Parquet files and split indices †
 ├── models/
-│   ├── ridge/                  # Ridge pipeline artifacts and run history
-│   ├── catboost/               # CatBoost model artifacts and run history
-│   ├── keras/                  # FT-Transformer weights, vocabs, and run history
-│   └── metrics/                # Cross-model comparison metrics
-│   ├── api_artifacts/          # Serving-layer reference artifacts (vocabs, medians, metadata)
+│   ├── ridge/                  # Latest pipeline + versioned run directories †
+│   ├── catboost/               # Latest model + tuning artifacts + versioned runs †
+│   ├── keras/                  # Latest weights + tuner history + versioned runs †
+│   ├── metrics/                # Cross-model comparison snapshots †
+│   └── api_artifacts/          # Serving-layer vocabs, medians, metadata †
 ├── notebooks/
-│   └── 01_used_car_price_regression.qmd   # Full analysis notebook (Quarto)
+│   ├── 01_used_car_price_regression.qmd           # Full analysis notebook (Quarto)
+│   ├── 01_used_car_price_regression.html          # Rendered HTML report
+│   └── 01_used_car_price_regression_files/        # Rendered figures and assets
 ├── src/
 │   ├── __init__.py
-│   ├── pipeline.py             # Cleaning and feature engineering (active)
-│   ├── data_prep.py            # Data ingestion stage (scaffolded for Part 2)
-│   ├── features.py             # Feature engineering stage (scaffolded for Part 2)
-│   ├── train_ridge.py          # Ridge training entrypoint (scaffolded for Part 2)
-│   ├── train_catboost.py       # CatBoost training entrypoint (scaffolded for Part 2)
-│   └── train_keras.py          # FT-Transformer training entrypoint (scaffolded for Part 2)
+│   └── pipeline.py             # Cleaning and feature engineering
 ├── .gitignore
 ├── pyproject.toml              # Project metadata and tool configuration
 ├── README.md
 ├── requirements.in             # Direct dependencies
 ├── requirements.txt            # Pinned dependencies
-└── requirements.freeze.txt     # Full environment snapshot
+└── requirements.freeze.txt     # Full environment snapshot †
+ 
+† Generated locally — not checked into version control. 
 ```
+See the [full analysis notebook](link-to-portfolio-page) for a complete listing of generated files.
+
+---
 
 ## Getting Started
 
@@ -138,27 +153,45 @@ jupyter lab notebooks/01_used_car_price_regression.qmd
 
 The notebook will automatically download the dataset via the Kaggle CLI on first run. To download manually, place `cars.csv` in `data/raw/`.
 
+---
+
 ## Tech Stack
 
-| Category                  | Tools                                                 |
-| ------------------------- | ----------------------------------------------------- |
-| **Languages**       | Python                                                |
-| **ML / Modeling**   | scikit-learn, CatBoost, TensorFlow/Keras, Keras Tuner |
-| **Data**            | pandas, NumPy, Parquet                                |
-| **Visualization**   | Matplotlib, Seaborn                                   |
-| **Reproducibility** | Quarto, joblib, JSON artifact versioning              |
+| Category              | Tools                                                         |
+| --------------------- | ------------------------------------------------------------- |
+| **Languages**         | Python                                                        |
+| **ML / Modeling**     | `scikit-learn`, `catboost`, TensorFlow/Keras, `keras-tuner`   |
+| **Data**              | `pandas`, `numpy`, Parquet                                    |
+| **Visualization**     | `matplotlib`, `seaborn`                                       |
+| **Reproducibility**   | Quarto, `joblib`, JSON artifact versioning                    |
+
+---
+
+## Part 2 — Production API & Deployment
+
+The modeling work in this repository is extended into a production-ready prediction service in a companion project: [**used-car-price-api**](link-to-repo).
+
+That project takes the trained CatBoost model, pipeline.py, and serving artifacts (`api_artifacts/`) from this repository and wraps them in a deployable inference pipeline:
+
+- **FastAPI application** with request validation, feature engineering, and batch prediction endpoints
+- **Containerized with Docker** and orchestrated via Docker Compose for local development
+- **Kubernetes manifests** for cloud deployment, including Deployments, Services, ConfigMaps, HPA autoscaling, and a dedicated namespace
+- **Test suite** covering health checks, pipeline logic, model loading, prediction accuracy, and integration tests
+- **CI-ready structure** with pinned dependencies, `.env` configuration, and `.dockerignore` for clean builds
+
+Together, the two repositories demonstrate the full ML lifecycle: data engineering and model development (Part 1) through containerized deployment and infrastructure (Part 2).
+
+---
 
 ## Future Work
-
-**Part 2 — Containerized Pipeline (planned):** Refactor the notebook-based workflow into a modular, deployable ML pipeline using Docker and Kubernetes. The `src/` module stubs (`data_prep.py`, `features.py`, `train_*.py`) are scaffolded for this phase — each becomes an independent pipeline stage that can be containerized, orchestrated, and scaled separately. The goal is to demonstrate production ML infrastructure alongside the modeling work in Part 1.
-
-Additional modeling improvements under consideration:
 
 - **Geographic features**: Incorporating location data (state, ZIP, metro) to capture regional pricing variation
 - **Temporal modeling**: Time-aware approaches to account for market dynamics like pandemic-era supply constraints
 - **Ensemble methods**: Weighted CatBoost + FT-Transformer blend to improve tail performance where the two models disagree
 - **Vehicle condition**: Incorporating granular condition descriptors that buyers weigh heavily in practice
 - **Luxury vehicle features**: Trim level, option packages, certification status, and collector-market relevance to reduce error for vehicles above $100k
+
+---
 
 ## Author
 
