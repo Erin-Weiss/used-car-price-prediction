@@ -11,7 +11,7 @@
 [![TensorFlow](https://img.shields.io/badge/TensorFlow-Keras-FF6F00?logo=tensorflow&logoColor=white)](https://www.tensorflow.org)
 [![Quarto](https://img.shields.io/badge/Quarto-Notebook-75AADB)](https://quarto.org)
 
-[View the Full Interactive Report](https://erin-weiss.github.io/articles/Used-Car-Price.html) | [Live GitHub Page](link-to-github-page)
+[View the Full Interactive Report](https://erin-weiss.github.io/articles/Used-Car-Price.html) | [Live GitHub Page](https://erin-weiss.github.io/used-car-price-prediction/)
 
 ---
 
@@ -114,6 +114,7 @@ The project uses a lightweight experiment management system designed for full re
 │   ├── __init__.py
 │   └── pipeline.py             # Cleaning and feature engineering
 ├── .gitignore
+├── index.html                  # GitHub Pages redirect to notebook report
 ├── pyproject.toml              # Project metadata and tool configuration
 ├── README.md
 ├── requirements.in             # Direct dependencies
@@ -197,7 +198,7 @@ Together, the two repositories demonstrate the full ML lifecycle: data engineeri
 
 **Erin Weiss** · [Portfolio](https://erin-weiss.github.io/index.html) · [LinkedIn](https://www.linkedin.com/in/erinweiss3/) · [GitHub](https://github.com/Erin-Weiss)
 
-- [Live Notebook](link-to-github-page) — Full rendered analysis with interactive code
+- [Live Notebook](https://erin-weiss.github.io/used-car-price-prediction/) — Full rendered analysis with interactive code
 
 ---
 
