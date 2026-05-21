@@ -18,6 +18,7 @@ models/
 .ipynb_checkpoints/
 .quarto/
 *_files/
+!notebooks/01_used_car_price_regression_files/
 
 # OS
 .DS_Store
