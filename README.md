@@ -170,7 +170,7 @@ The notebook will automatically download the dataset via the Kaggle CLI on first
 
 ## Part 2 — Production API & Deployment
 
-The modeling work in this repository is extended into a production-ready prediction service in a companion project: [**used-car-price-api**](link-to-repo).
+The modeling work in this repository is extended into a production-ready prediction service in a companion project: [used-car-price-api](https://github.com/Erin-Weiss/used-car-price-api).
 
 That project takes the trained CatBoost model, pipeline.py, and serving artifacts (`api_artifacts/`) from this repository and wraps them in a deployable inference pipeline:
 
