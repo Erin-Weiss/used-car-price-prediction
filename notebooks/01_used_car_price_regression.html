@@ -221,7 +221,7 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
 <h2 class="anchored" data-anchor-id="project-background">Project Background</h2>
 <section id="objective" class="level3">
 <h3 class="anchored" data-anchor-id="objective">Objective</h3>
-<p>This project predicts used-car listing prices from structured vehicle attributes using three increasingly sophisticated modeling approaches. The objective is not only to minimize error but also to examine the balance between interpretability, feature engineering effort, and predictive performance on real-world tabular data.</p>
+<p>This project predicts used-car listing prices from structured vehicle attributes using three increasingly sophisticated modeling approaches. The goal while comparing these methods is to minimize the error, but also to examine the balance between interpretability, feature engineering effort, and evaluate predictive performance on real-world data.</p>
 <div class="callout callout-style-default callout-note callout-titled" title="Why This Matters">
 <div class="callout-header d-flex align-content-center">
 <div class="callout-icon-container">
@@ -232,10 +232,9 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
 </div>
 </div>
 <div class="callout-body-container callout-body">
-<p>Used-car pricing is a high-stakes, high-volume problem. Dealerships, online marketplaces, and lenders all need fast, accurate price estimates to set competitive listing prices, flag underpriced inventory for acquisition, detect overpriced listings, and underwrite auto loans. A model that predicts within ~$1,300 of the true price at the median — as CatBoost does here — is accurate enough to automate first-pass pricing, reduce the need for manual appraisals, and surface arbitrage opportunities across a portfolio of thousands of vehicles.</p>
+<p>Applying machine learning models to used car pricing can be an effective tool for dealerships, online marketplaces, and lenders to quickly and accurately set competitive listing prices, flag underpriced inventory for acquisition, detect overpriced listings, and underwrite auto loans. A model that predicts within ~$1,300 of the true price at the median — as CatBoost does here — is accurate enough to automate first-pass pricing and reduce the need for manual appraisals. Further development of this model through incorporating additional features and ensemble methods could reduce the median margin of error even more and improve production readiness.</p>
 </div>
 </div>
-<p>The final selected model is <strong>CatBoost</strong>, which achieved the best generalization performance across all metrics, required the least hyperparameter tuning, and produced the most stable predictions across the full price range.</p>
 </section>
 <section id="dataset" class="level3">
 <h3 class="anchored" data-anchor-id="dataset">Dataset</h3>
@@ -302,6 +301,7 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
 </tbody>
 </table>
 <p>CatBoost outperforms Ridge by roughly 50% across every metric and edges out the FT-Transformer by a meaningful margin, particularly on full-distribution RMSE, where sensitivity to rare high-value vehicles amplifies differences.</p>
+<p>Ultimately, the <strong>CatBoost</strong> model achieved the best generalization performance across all metrics, required the least hyperparameter tuning, and produced the most stable predictions across the full price range.</p>
 </section>
 <section id="key-predictive-features" class="level3">
 <h3 class="anchored" data-anchor-id="key-predictive-features">Key Predictive Features</h3>
@@ -557,7 +557,7 @@ chmod 600 ~/.kaggle/access_token</code></pre>
 <section id="project-setup" class="level3">
 <h3 class="anchored" data-anchor-id="project-setup">Project Setup</h3>
 <p>The setup cell loads all dependencies, defines project paths, configures training control flags, and includes a Kaggle CLI download helper that automatically fetches the raw dataset if it’s not already present locally. All artifact paths follow the versioning system described in the folder structure above. The project root is also added to the Python path, allowing modules in <code>src/</code> to be imported.</p>
-<div id="48f492b3" class="cell" data-execution_count="1">
+<div id="415b7116" class="cell" data-execution_count="1">
 <details class="code-fold">
 <summary>Libraries, paths, training flags, Kaggle download helper, and artifact utilities</summary>
 <div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb6"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb6-1"><a href="#cb6-1" aria-hidden="true" tabindex="-1"></a><span class="co"># ===============================</span></span>
@@ -1015,7 +1015,7 @@ chmod 600 ~/.kaggle/access_token</code></pre>
 <section id="import-raw-and-display-original-data" class="level4 page-columns page-full">
 <h4 class="anchored" data-anchor-id="import-raw-and-display-original-data">Import Raw and Display Original Data</h4>
 <p>The raw dataset contains 762,091 listings across 20 columns. Missing values are concentrated in a few columns — <code>price_drop</code> (46% of rows missing), <code>seller_rating</code> (28%), and <code>mpg</code> (19%):</p>
-<div id="2d95e4d8" class="cell" data-execution_count="4">
+<div id="60de8d60" class="cell" data-execution_count="4">
 <details class="code-fold">
 <summary>Load raw CSV and display column info</summary>
 <div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb7"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb7-1"><a href="#cb7-1" aria-hidden="true" tabindex="-1"></a>df_raw <span class="op">=</span> pd.read_csv(RAW_CSV)</span>
@@ -1051,7 +1051,7 @@ dtypes: float64(9), int64(1), str(10)
 memory usage: 212.7 MB</code></pre>
 </div>
 </div>
-<div id="fb8ef4b7" class="cell" data-execution_count="5">
+<div id="60b6d57c" class="cell" data-execution_count="5">
 <details class="code-fold">
 <summary>Missing values by column</summary>
 <div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb9"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb9-1"><a href="#cb9-1" aria-hidden="true" tabindex="-1"></a>display(df_raw.isnull().<span class="bu">sum</span>().sort_values(ascending<span class="op">=</span><span class="va">False</span>))</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
@@ -1081,7 +1081,7 @@ dtype: int64</code></pre>
 </div>
 </div>
 <p>A sample of the raw data shows the heterogeneous text formatting in columns like <code>engine</code> and <code>transmission</code> — these will be parsed into structured features during feature engineering:</p>
-<div id="7a91424e" class="cell page-columns page-full" data-execution_count="6">
+<div id="262eca32" class="cell page-columns page-full" data-execution_count="6">
 <details class="code-fold">
 <summary>Raw data preview</summary>
 <div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb11"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb11-1"><a href="#cb11-1" aria-hidden="true" tabindex="-1"></a>display(df_raw.head())</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
@@ -1242,7 +1242,7 @@ dtype: int64</code></pre>
 <section id="clean-dataset-save-to-parquet-and-display-cleaned-dataframe" class="level4 page-columns page-full">
 <h4 class="anchored" data-anchor-id="clean-dataset-save-to-parquet-and-display-cleaned-dataframe">Clean Dataset, Save to Parquet, and Display Cleaned Dataframe</h4>
 <p>The cleaning function computes <code>mpg_avg</code>, drops incomplete rows, and casts binary flags to integers. Results are cached as a Parquet checkpoint.</p>
-<div id="f4e5acb9" class="cell" data-execution_count="7">
+<div id="ef4386b7" class="cell" data-execution_count="7">
 <details class="code-fold">
 <summary>Cleaning function: compute mpg_avg, drop nulls, cast binary flags</summary>
 <div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb12"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb12-1"><a href="#cb12-1" aria-hidden="true" tabindex="-1"></a><span class="kw">def</span> normalize_text_basic(s: pd.Series) <span class="op">-&gt;</span> pd.Series:</span>
@@ -1316,7 +1316,7 @@ dtype: int64</code></pre>
 </div>
 </div>
 <p>After cleaning, the dataset has 243,500 fully observed rows with no missing values:</p>
-<div id="b6aaa05e" class="cell page-columns page-full" data-execution_count="8">
+<div id="77ca9fd5" class="cell page-columns page-full" data-execution_count="8">
 <details class="code-fold">
 <summary>Cleaned data preview</summary>
 <div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb14"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb14-1"><a href="#cb14-1" aria-hidden="true" tabindex="-1"></a>display(df_cleaned.head())</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
@@ -1473,7 +1473,7 @@ dtype: int64</code></pre>
 </div>
 </div>
 </div>
-<div id="da664570" class="cell" data-execution_count="9">
+<div id="4c73df34" class="cell" data-execution_count="9">
 <details class="code-fold">
 <summary>Confirm zero missing values after cleaning</summary>
 <div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb15"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb15-1"><a href="#cb15-1" aria-hidden="true" tabindex="-1"></a>display(df_cleaned.isnull().<span class="bu">sum</span>())</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
@@ -1510,7 +1510,7 @@ dtype: int64</code></pre>
 <p>NOTE: All exploration below is performed on the cleaned dataset, before feature engineering.</p>
 </blockquote>
 <p>Column cardinality ranges from 2 (binary flags) to 104,507 (mileage), revealing which features will need dimensionality reduction:</p>
-<div id="5368e233" class="cell" data-execution_count="10">
+<div id="ac93b36f" class="cell" data-execution_count="10">
 <details class="code-fold">
 <summary>Unique value counts and dtypes per column</summary>
 <div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb17"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb17-1"><a href="#cb17-1" aria-hidden="true" tabindex="-1"></a>summary <span class="op">=</span> (</span>
@@ -1643,7 +1643,7 @@ dtype: int64</code></pre>
 </div>
 </div>
 <p>Key dataset dimensions:</p>
-<div id="baf4fd87" class="cell" data-execution_count="11">
+<div id="60bcef66" class="cell" data-execution_count="11">
 <details class="code-fold">
 <summary>Dataset summary statistics</summary>
 <div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb18"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb18-1"><a href="#cb18-1" aria-hidden="true" tabindex="-1"></a>n_entries <span class="op">=</span> <span class="bu">len</span>(df_cleaned)</span>
@@ -1671,7 +1671,7 @@ Most common year: 2020</code></pre>
 </div>
 </div>
 <p>Price distribution summary — the mean ($30,680) is pulled well above the median ($27,500) by the right tail:</p>
-<div id="7c24916a" class="cell" data-execution_count="12">
+<div id="4a2e1ed5" class="cell" data-execution_count="12">
 <details class="code-fold">
 <summary>Price distribution statistics</summary>
 <div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb20"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb20-1"><a href="#cb20-1" aria-hidden="true" tabindex="-1"></a>desc <span class="op">=</span> df_cleaned[<span class="st">"price"</span>].describe()</span>
@@ -1695,7 +1695,7 @@ Name: price, dtype: object</code></pre>
 </div>
 <section id="exploratory-graphs" class="level4">
 <h4 class="anchored" data-anchor-id="exploratory-graphs">Exploratory Graphs</h4>
-<div id="64e188ea" class="cell" data-execution_count="13">
+<div id="6e4509b3" class="cell" data-execution_count="13">
 <details class="code-fold">
 <summary>Price distribution (full range)</summary>
 <div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb22"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb22-1"><a href="#cb22-1" aria-hidden="true" tabindex="-1"></a>fig, ax <span class="op">=</span> plt.subplots(figsize<span class="op">=</span>(<span class="dv">8</span>, <span class="dv">5</span>))</span>
@@ -1715,7 +1715,7 @@ Name: price, dtype: object</code></pre>
 </div>
 </div>
 </div>
-<div id="6cfbe2c6" class="cell" data-execution_count="14">
+<div id="b9902406" class="cell" data-execution_count="14">
 <details class="code-fold">
 <summary>Price distribution (1–99% clipped)</summary>
 <div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb23"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb23-1"><a href="#cb23-1" aria-hidden="true" tabindex="-1"></a>low, high <span class="op">=</span> df_cleaned[<span class="st">"price"</span>].quantile([<span class="fl">0.01</span>, <span class="fl">0.99</span>])</span>
@@ -1738,7 +1738,7 @@ Name: price, dtype: object</code></pre>
 </div>
 </div>
 </div>
-<div id="bc25f22e" class="cell" data-execution_count="15">
+<div id="529e7926" class="cell" data-execution_count="15">
 <details class="code-fold">
 <summary>Manufacturer frequency</summary>
 <div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb24"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb24-1"><a href="#cb24-1" aria-hidden="true" tabindex="-1"></a>order <span class="op">=</span> df_cleaned[<span class="st">"manufacturer"</span>].value_counts(ascending<span class="op">=</span><span class="va">False</span>).index</span>
@@ -1759,7 +1759,7 @@ Name: price, dtype: object</code></pre>
 </div>
 </div>
 </div>
-<div id="515a2773" class="cell" data-execution_count="16">
+<div id="f5db2239" class="cell" data-execution_count="16">
 <details class="code-fold">
 <summary>Year distribution</summary>
 <div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb25"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb25-1"><a href="#cb25-1" aria-hidden="true" tabindex="-1"></a>sns.countplot(x<span class="op">=</span><span class="st">"year"</span>, data<span class="op">=</span>df_cleaned, hue<span class="op">=</span><span class="st">"year"</span>, palette<span class="op">=</span><span class="st">"bright"</span>, legend<span class="op">=</span><span class="va">False</span>)</span>
@@ -1778,7 +1778,7 @@ Name: price, dtype: object</code></pre>
 </div>
 </div>
 </div>
-<div id="4a85ec6d" class="cell" data-execution_count="17">
+<div id="a4e351f1" class="cell" data-execution_count="17">
 <details class="code-fold">
 <summary>Unique model count per manufacturer</summary>
 <div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb26"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb26-1"><a href="#cb26-1" aria-hidden="true" tabindex="-1"></a>df_models <span class="op">=</span> (</span>
@@ -1810,7 +1810,7 @@ Name: price, dtype: object</code></pre>
 </div>
 </div>
 </div>
-<div id="54518edc" class="cell" data-execution_count="18">
+<div id="522393dc" class="cell" data-execution_count="18">
 <details class="code-fold">
 <summary>Price by manufacturer (full range)</summary>
 <div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb27"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb27-1"><a href="#cb27-1" aria-hidden="true" tabindex="-1"></a>order <span class="op">=</span> (</span>
@@ -1839,7 +1839,7 @@ Name: price, dtype: object</code></pre>
 </div>
 </div>
 </div>
-<div id="54502007" class="cell" data-execution_count="19">
+<div id="855fa888" class="cell" data-execution_count="19">
 <details class="code-fold">
 <summary>Price by manufacturer (1–99% within each brand)</summary>
 <div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb28"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb28-1"><a href="#cb28-1" aria-hidden="true" tabindex="-1"></a><span class="kw">def</span> filter_group(g):</span>
@@ -1923,7 +1923,7 @@ Name: price, dtype: object</code></pre>
 </section>
 <section id="feature-engineering-code-and-save-new-parquet" class="level4">
 <h4 class="anchored" data-anchor-id="feature-engineering-code-and-save-new-parquet">Feature Engineering Code and Save New Parquet</h4>
-<div id="7974eb25" class="cell" data-execution_count="20">
+<div id="e23c425d" class="cell" data-execution_count="20">
 <details class="code-fold">
 <summary>Feature engineering: engine parsing, transmission normalization, color collapsing, derived features</summary>
 <div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb29"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb29-1"><a href="#cb29-1" aria-hidden="true" tabindex="-1"></a><span class="co"># </span><span class="al">NOTE</span><span class="co">: If cleaning or feature-engineering logic changes, bump FEATURE_PIPELINE_VERSION.</span></span>
@@ -2117,7 +2117,7 @@ Name: price, dtype: object</code></pre>
 <section id="display-dataframe-after-feature-engineering" class="level4 page-columns page-full">
 <h4 class="anchored" data-anchor-id="display-dataframe-after-feature-engineering">Display Dataframe After Feature Engineering</h4>
 <p>The engineered feature set has 27 columns — replacing the raw dataset’s high-cardinality text fields with structured, model-ready features:</p>
-<div id="e8ce5453" class="cell page-columns page-full" data-execution_count="21">
+<div id="1c0e3f5a" class="cell page-columns page-full" data-execution_count="21">
 <details class="code-fold">
 <summary>Feature table preview</summary>
 <div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb31"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb31-1"><a href="#cb31-1" aria-hidden="true" tabindex="-1"></a>display(X.head())</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
@@ -2282,7 +2282,7 @@ Name: price, dtype: object</code></pre>
 </div>
 </div>
 <p>Sparse missingness remains in three parsed engine columns; these are handled by model-specific imputation:</p>
-<div id="c8d640f6" class="cell" data-execution_count="22">
+<div id="4ad8f66b" class="cell" data-execution_count="22">
 <details class="code-fold">
 <summary>Missing values after feature engineering</summary>
 <div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb32"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb32-1"><a href="#cb32-1" aria-hidden="true" tabindex="-1"></a>display(X.isnull().<span class="bu">sum</span>().sort_values(ascending<span class="op">=</span><span class="va">False</span>))</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
@@ -2370,7 +2370,7 @@ metrics are also reported on a <strong>1–99% clipped subset</strong> based on 
 </section>
 <section id="make-trainvaltest-splits" class="level4">
 <h4 class="anchored" data-anchor-id="make-trainvaltest-splits">Make Train/Val/Test Splits</h4>
-<div id="3c2a057f" class="cell" data-execution_count="23">
+<div id="9e28d5d8" class="cell" data-execution_count="23">
 <details class="code-fold">
 <summary>Code</summary>
 <div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb34"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb34-1"><a href="#cb34-1" aria-hidden="true" tabindex="-1"></a><span class="co"># ----------------------------</span></span>
@@ -2439,7 +2439,7 @@ Clip bounds (from train): $7,000 – $90,889</code></pre>
 </section>
 <section id="feature-schema" class="level4">
 <h4 class="anchored" data-anchor-id="feature-schema">Feature schema</h4>
-<div id="5d9795fa" class="cell" data-execution_count="24">
+<div id="64c0026e" class="cell" data-execution_count="24">
 <details class="code-fold">
 <summary>Code</summary>
 <div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb36"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb36-1"><a href="#cb36-1" aria-hidden="true" tabindex="-1"></a><span class="co"># ===============================</span></span>
@@ -2483,7 +2483,7 @@ Keras categorical cols: 8 ['manufacturer', 'model', 'drivetrain', 'fuel_type', '
 <section id="export-vocabularies-and-model-metadata" class="level4">
 <h4 class="anchored" data-anchor-id="export-vocabularies-and-model-metadata">Export Vocabularies and Model Metadata</h4>
 <p>Part 2 of this project builds a FastAPI prediction endpoint around the best model from Part 1 (Catboost). To ensure consistent preprocessing and validation, the notebook exports three reference artifacts to <code>models/api_artifacts/</code>: (1) categorical vocabularies containing known values for each categorical feature, (2) numeric medians for imputing missing optional fields, and (3) a model metadata file. The model metadata file records the feature column order, clip bounds, drivetrain mapping, luxury brand list, and pipeline version. These artifacts are loaded once at API startup so that no training-time information is hardcoded in the serving layer.</p>
-<div id="72663294" class="cell" data-execution_count="25">
+<div id="0ef09c73" class="cell" data-execution_count="25">
 <details class="code-fold">
 <summary>Code</summary>
 <div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb38"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb38-1"><a href="#cb38-1" aria-hidden="true" tabindex="-1"></a><span class="co"># ===============================================================</span></span>
@@ -2615,13 +2615,13 @@ Keras categorical cols: 8 ['manufacturer', 'model', 'drivetrain', 'fuel_type', '
 ✅ Saved model_metadata.json
    Feature columns: 27
    Clip bounds: $7,000 – $90,889
-📁 All API artifacts: /Users/erinweiss/Desktop/Professional/Port-Web Everything/Projects/used-car-price/models/api_artifacts</code></pre>
+📁 All API artifacts: /Users/erinweiss/Desktop/Professional/Port-Web Everything/Projects/GitHub Repo/used-car-price-prediction/models/api_artifacts</code></pre>
 </div>
 </div>
 </section>
 <section id="evaluation-functions" class="level4">
 <h4 class="anchored" data-anchor-id="evaluation-functions">Evaluation Functions</h4>
-<div id="f436d822" class="cell" data-execution_count="26">
+<div id="def8d300" class="cell" data-execution_count="26">
 <details class="code-fold">
 <summary>Evaluation functions: RMSE, MAE, MedianAE, full and clipped metrics</summary>
 <div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb40"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb40-1"><a href="#cb40-1" aria-hidden="true" tabindex="-1"></a><span class="kw">def</span> rmse(y_true, y_pred) <span class="op">-&gt;</span> <span class="bu">float</span>:</span>
@@ -2690,7 +2690,7 @@ Keras categorical cols: 8 ['manufacturer', 'model', 'drivetrain', 'fuel_type', '
 <h3 class="anchored" data-anchor-id="ridge-regression-pipeline-grid-search">Ridge Regression (Pipeline + Grid Search)</h3>
 <section id="ridge-training" class="level4">
 <h4 class="anchored" data-anchor-id="ridge-training">Ridge Training</h4>
-<div id="29adbae3" class="cell" data-execution_count="27">
+<div id="a8065a7e" class="cell" data-execution_count="27">
 <details class="code-fold">
 <summary>Ridge: GridSearchCV with 5-fold CV, refit on train+val, save artifacts</summary>
 <div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb41"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb41-1"><a href="#cb41-1" aria-hidden="true" tabindex="-1"></a><span class="co"># ==========================================================</span></span>
@@ -2816,7 +2816,7 @@ Keras categorical cols: 8 ['manufacturer', 'model', 'drivetrain', 'fuel_type', '
 </section>
 <section id="ridge-evaluation" class="level4">
 <h4 class="anchored" data-anchor-id="ridge-evaluation">Ridge Evaluation</h4>
-<div id="cf1ed9e8" class="cell" data-execution_count="28">
+<div id="0cc90a0c" class="cell" data-execution_count="28">
 <details class="code-fold">
 <summary>Ridge evaluation: test metrics, train+val metrics, largest residuals</summary>
 <div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb43"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb43-1"><a href="#cb43-1" aria-hidden="true" tabindex="-1"></a><span class="co"># ==========================================================</span></span>
@@ -3166,7 +3166,7 @@ Total features (num + ohe): 988</code></pre>
 <h3 class="anchored" data-anchor-id="catboost-grid-search-early-stopping-refit">CatBoost (Grid Search → Early Stopping Refit)</h3>
 <section id="catboost-setup-functions" class="level4">
 <h4 class="anchored" data-anchor-id="catboost-setup-functions">Catboost Setup Functions</h4>
-<div id="fa0cedba" class="cell" data-execution_count="29">
+<div id="35b867e7" class="cell" data-execution_count="29">
 <details class="code-fold">
 <summary>CatBoost helper functions: status display, staged grid search, early stopping refit</summary>
 <div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb46"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb46-1"><a href="#cb46-1" aria-hidden="true" tabindex="-1"></a><span class="kw">def</span> _status_label(done: Path, prog: Path) <span class="op">-&gt;</span> <span class="bu">str</span>:</span>
@@ -3207,7 +3207,7 @@ Total features (num + ohe): 988</code></pre>
 <span id="cb46-36"><a href="#cb46-36" aria-hidden="true" tabindex="-1"></a>    <span class="bu">print</span>(<span class="st">"  Model file:"</span>, <span class="st">"✅ present"</span> <span class="cf">if</span> model_path.exists() <span class="cf">else</span> <span class="st">"— missing"</span>)</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
 </details>
 </div>
-<div id="34463496" class="cell" data-execution_count="30">
+<div id="4014c43b" class="cell" data-execution_count="30">
 <details class="code-fold">
 <summary>Code</summary>
 <div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb47"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb47-1"><a href="#cb47-1" aria-hidden="true" tabindex="-1"></a><span class="co"># ==========================================================</span></span>
@@ -3330,7 +3330,7 @@ Total features (num + ohe): 988</code></pre>
 <span id="cb47-118"><a href="#cb47-118" aria-hidden="true" tabindex="-1"></a>        )</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
 </details>
 </div>
-<div id="1aaf876c" class="cell" data-execution_count="31">
+<div id="970518f4" class="cell" data-execution_count="31">
 <details class="code-fold">
 <summary>Code</summary>
 <div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb48"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb48-1"><a href="#cb48-1" aria-hidden="true" tabindex="-1"></a><span class="kw">def</span> _stage_paths(run_dir: Path, stage: <span class="bu">str</span>):</span>
@@ -3362,7 +3362,7 @@ Total features (num + ohe): 988</code></pre>
 </section>
 <section id="catboost-training" class="level4">
 <h4 class="anchored" data-anchor-id="catboost-training">Catboost Training</h4>
-<div id="74d5c772" class="cell" data-execution_count="32">
+<div id="3d2b0b1e" class="cell" data-execution_count="32">
 <details class="code-fold">
 <summary>CatBoost: staged hyperparameter search, early stopping, final refit on train+val</summary>
 <div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb49"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb49-1"><a href="#cb49-1" aria-hidden="true" tabindex="-1"></a>print_catboost_status_global_and_latest_run(CATBOOST_DIR)</span>
@@ -3804,7 +3804,7 @@ CatBoost checkpoint status (LATEST RUN): run_20260330_155113_full
 </section>
 <section id="catboost-evaluation" class="level4">
 <h4 class="anchored" data-anchor-id="catboost-evaluation">Catboost Evaluation</h4>
-<div id="1c88d8e0" class="cell" data-execution_count="33">
+<div id="f8bed33b" class="cell" data-execution_count="33">
 <details class="code-fold">
 <summary>CatBoost evaluation: train/val/test metrics, feature importance</summary>
 <div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb51"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb51-1"><a href="#cb51-1" aria-hidden="true" tabindex="-1"></a><span class="co"># ==========================================================</span></span>
@@ -4306,7 +4306,7 @@ CATBOOST TEST RMSE ($): 3,935</code></pre>
 <h4 class="anchored" data-anchor-id="catboost-interpretation">CatBoost Interpretation</h4>
 <p>CatBoost is the <strong>selected final model</strong> for this project, achieving the best performance across all metrics.</p>
 <p><strong>Training process</strong>: Hyperparameters were selected using the training split with cross-validation via a staged grid search to balance performance and computational cost. A validation split was then used for early stopping to automatically select the optimal ensemble size. After model selection was finalized, the final model was refit on the combined train+validation data and evaluated on the held-out test set.</p>
-<p><strong>Performance</strong>: CatBoost cuts Ridge’s test MAE roughly in half ($1,916 vs.&nbsp;$3,011) and reduces RMSE by nearly 50% ($3,935 vs.&nbsp;$7,824). The clipped test RMSE of $2,665 means that for the vast majority of vehicles, predictions are within ~$2,700 of the actual price — well within the normal range of market variability for used cars.</p>
+<p><strong>Performance</strong>: CatBoost cuts Ridge’s test MAE by over $1,000 ($1,916 vs.&nbsp;$3,011) and reduces RMSE by nearly 50% ($3,935 vs.&nbsp;$7,824). The clipped test RMSE of $2,665 means that for the vast majority of vehicles, predictions are within ~$2,700 of the actual price — well within the normal range of market variability for used cars.</p>
 <p><strong>Feature importance highlights</strong>: CatBoost’s built-in feature importance reveals that <code>age</code> (19.0%) and <code>mileage</code> (14.3%) are the dominant predictors, followed by <code>model</code> (11.0%) and <code>manufacturer</code> (9.4%). This aligns with domain knowledge — depreciation (age + mileage) is the primary driver of used-car pricing, while make and model capture brand and segment effects.</p>
 <p>Notably, <code>mpg_avg</code> (8.1%) ranks higher than <code>engine_cylinders</code> (6.1%), suggesting that fuel efficiency carries a meaningful price signal beyond what engine size alone captures. The <code>luxury_age_interaction</code> feature (3.2%) provides modest additional signal beyond the <code>is_luxury_brand</code> flag (6.4%) and <code>age</code> (12.0%) alone, suggesting that luxury depreciation patterns differ enough from those of mass-market vehicles to justify the interaction term.</p>
 </section>
@@ -4315,7 +4315,7 @@ CATBOOST TEST RMSE ($): 3,935</code></pre>
 <h3 class="anchored" data-anchor-id="ft-transformer-learned-embeddings-attention">FT-Transformer (Learned Embeddings + Attention)</h3>
 <section id="ft-transformer-setup" class="level4">
 <h4 class="anchored" data-anchor-id="ft-transformer-setup">FT-Transformer Setup</h4>
-<div id="f3cc7a31" class="cell" data-execution_count="34">
+<div id="49cce8a1" class="cell" data-execution_count="34">
 <details class="code-fold">
 <summary>FT-Transformer setup: reproducibility seeds and configuration</summary>
 <div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb53"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb53-1"><a href="#cb53-1" aria-hidden="true" tabindex="-1"></a><span class="co"># ----------------------------</span></span>
@@ -4326,7 +4326,7 @@ CATBOOST TEST RMSE ($): 3,935</code></pre>
 <span id="cb53-6"><a href="#cb53-6" aria-hidden="true" tabindex="-1"></a>np.random.seed(SEED)</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
 </details>
 </div>
-<div id="d39821cf" class="cell" data-execution_count="35">
+<div id="c5b461ef" class="cell" data-execution_count="35">
 <details class="code-fold">
 <summary>Code</summary>
 <div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb54"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb54-1"><a href="#cb54-1" aria-hidden="true" tabindex="-1"></a><span class="co"># ----------------------------</span></span>
@@ -4424,7 +4424,7 @@ CATBOOST TEST RMSE ($): 3,935</code></pre>
 </section>
 <section id="ft-transformer-model-preprocessing" class="level4">
 <h4 class="anchored" data-anchor-id="ft-transformer-model-preprocessing">FT-Transformer Model Preprocessing</h4>
-<div id="8b574902" class="cell" data-execution_count="36">
+<div id="3187ceea" class="cell" data-execution_count="36">
 <details class="code-fold">
 <summary>FT-Transformer preprocessing: numeric normalization, categorical vocabulary encoding</summary>
 <div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb55"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb55-1"><a href="#cb55-1" aria-hidden="true" tabindex="-1"></a><span class="co"># ----------------------------</span></span>
@@ -4512,7 +4512,7 @@ NN numeric cols: 21 | NN cat cols: 8
 </section>
 <section id="ft-transformer-model-building" class="level4">
 <h4 class="anchored" data-anchor-id="ft-transformer-model-building">FT-Transformer Model Building</h4>
-<div id="d62715d9" class="cell" data-execution_count="37">
+<div id="48cd7cf2" class="cell" data-execution_count="37">
 <details class="code-fold">
 <summary>FT-Transformer architecture: embedding layers, multi-head attention blocks, output head</summary>
 <div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb57"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb57-1"><a href="#cb57-1" aria-hidden="true" tabindex="-1"></a><span class="co"># ----------------------------</span></span>
@@ -4856,7 +4856,7 @@ NN numeric cols: 21 | NN cat cols: 8
 </section>
 <section id="ft-transformer-model-optional-tuning" class="level4">
 <h4 class="anchored" data-anchor-id="ft-transformer-model-optional-tuning">FT-Transformer Model Optional Tuning</h4>
-<div id="a71ce083" class="cell" data-execution_count="38">
+<div id="d3ce5e4d" class="cell" data-execution_count="38">
 <details class="code-fold">
 <summary>Code</summary>
 <div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb58"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb58-1"><a href="#cb58-1" aria-hidden="true" tabindex="-1"></a><span class="co"># ==========================================================</span></span>
@@ -5380,7 +5380,7 @@ NN numeric cols: 21 | NN cat cols: 8
 </section>
 <section id="ft-transformer-model-training" class="level4">
 <h4 class="anchored" data-anchor-id="ft-transformer-model-training">FT-Transformer Model Training</h4>
-<div id="6d22ecd0" class="cell" data-execution_count="39">
+<div id="62c1e089" class="cell" data-execution_count="39">
 <details class="code-fold">
 <summary>FT-Transformer training: learning rate schedule, early stopping, checkpoint management</summary>
 <div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb59"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb59-1"><a href="#cb59-1" aria-hidden="true" tabindex="-1"></a><span class="co"># ----------------------------</span></span>
@@ -5887,7 +5887,7 @@ NN numeric cols: 21 | NN cat cols: 8
 </section>
 <section id="ft-transformer-evaluation" class="level4">
 <h4 class="anchored" data-anchor-id="ft-transformer-evaluation">FT-Transformer Evaluation</h4>
-<div id="cb6e39aa" class="cell" data-execution_count="40">
+<div id="181c312e" class="cell" data-execution_count="40">
 <details class="code-fold">
 <summary>FT-Transformer evaluation: test metrics, permutation importance, training curves</summary>
 <div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb61"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb61-1"><a href="#cb61-1" aria-hidden="true" tabindex="-1"></a><span class="co"># ----------------------------</span></span>
@@ -6675,7 +6675,7 @@ Keras artifact kind: latest</code></pre>
 </section>
 <section id="ft-transformer-interpretation" class="level4">
 <h4 class="anchored" data-anchor-id="ft-transformer-interpretation">FT-Transformer Interpretation</h4>
-<p>The FT-Transformer was included as evidence of advanced experimentation with deep learning on tabular data, not necessarily as the production pick.</p>
+<p>The FT-Transformer was included as evidence of advanced experimentation with deep learning on tabular data, but was ultimately outperformed by CatBoost on metrics and operability.</p>
 <p><strong>Architecture</strong>: The model uses learned embeddings for each categorical feature and a Transformer-style attention mechanism to capture feature interactions. This is a more modern approach than simple dense networks for tabular data.</p>
 <p><strong>Performance</strong>: The FT-Transformer achieved competitive results — its clipped test MAE ($1,800) is within $20 of CatBoost ($1,782), showing that it learned meaningful representations. However, its full-distribution RMSE ($4,255) is ~8% higher than CatBoost’s ($3,935), indicating greater sensitivity to rare, high-price vehicles.</p>
 <p><strong>Permutation importance</strong>: The permutation-based feature importance largely agrees with CatBoost’s rankings — <code>model</code> (25.0%), <code>manufacturer</code> (14.4%), <code>mileage</code> (14.1%), and <code>age</code> (12.0%) are the top features. The consistency across model families suggests these are genuinely the most informative features rather than artifacts of a particular algorithm.</p>
@@ -6690,7 +6690,7 @@ Keras artifact kind: latest</code></pre>
 <section id="metrics-export" class="level3">
 <h3 class="anchored" data-anchor-id="metrics-export">Metrics Export</h3>
 <p>Metrics for all three models are written to a unified JSON file for downstream analysis and reproducibility. Each model’s results include full-distribution and clipped variants for both train+val and test splits.</p>
-<div id="9a23832a" class="cell" data-execution_count="41">
+<div id="615d63fc" class="cell" data-execution_count="41">
 <details class="code-fold">
 <summary>Write unified metrics JSON for all models</summary>
 <div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb63"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb63-1"><a href="#cb63-1" aria-hidden="true" tabindex="-1"></a><span class="co"># -------------------------</span></span>
@@ -6875,7 +6875,7 @@ Keras artifact kind: latest</code></pre>
 <h3 class="anchored" data-anchor-id="model-comparison-graphs">Model Comparison Graphs</h3>
 <section id="plotting-functions-for-models" class="level4">
 <h4 class="anchored" data-anchor-id="plotting-functions-for-models">Plotting Functions for Models</h4>
-<div id="846095f7" class="cell" data-execution_count="42">
+<div id="7cd648e3" class="cell" data-execution_count="42">
 <details class="code-fold">
 <summary>Diagnostic plot functions: pred vs actual, residuals, absolute error, pred vs pred</summary>
 <div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb65"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb65-1"><a href="#cb65-1" aria-hidden="true" tabindex="-1"></a><span class="co"># =========================</span></span>
@@ -7047,7 +7047,7 @@ Keras artifact kind: latest</code></pre>
 <section id="model-graph-section" class="level4">
 <h4 class="anchored" data-anchor-id="model-graph-section">Model Graph Section</h4>
 <p>The following diagnostic plots are generated for each model on the test set. Each model gets four plot types in both unclipped and clipped (1–99%) views.</p>
-<div id="5e601e0e" class="cell" data-execution_count="43">
+<div id="23467fa6" class="cell" data-execution_count="43">
 <details class="code-fold">
 <summary>Collect test-set predictions from all available models</summary>
 <div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb66"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb66-1"><a href="#cb66-1" aria-hidden="true" tabindex="-1"></a><span class="cf">if</span> (<span class="st">"X_test"</span> <span class="kw">not</span> <span class="kw">in</span> <span class="bu">globals</span>()) <span class="kw">or</span> (<span class="st">"y_test"</span> <span class="kw">not</span> <span class="kw">in</span> <span class="bu">globals</span>()):</span>
@@ -7079,7 +7079,7 @@ Keras artifact kind: latest</code></pre>
 </details>
 </div>
 <p><strong>Ridge Diagnostics</strong></p>
-<div id="f003086f" class="cell" data-execution_count="44">
+<div id="755c0baa" class="cell" data-execution_count="44">
 <details class="code-fold">
 <summary>Ridge: predicted vs actual, residuals, absolute error (unclipped + clipped)</summary>
 <div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb67"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb67-1"><a href="#cb67-1" aria-hidden="true" tabindex="-1"></a><span class="cf">if</span> <span class="st">"Ridge"</span> <span class="kw">in</span> preds:</span>
@@ -7165,7 +7165,7 @@ Keras artifact kind: latest</code></pre>
 </div>
 </div>
 <p><strong>CatBoost Diagnostics</strong></p>
-<div id="97055ad3" class="cell" data-execution_count="45">
+<div id="eae188d3" class="cell" data-execution_count="45">
 <details class="code-fold">
 <summary>CatBoost: predicted vs actual, residuals, absolute error (unclipped + clipped)</summary>
 <div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb68"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb68-1"><a href="#cb68-1" aria-hidden="true" tabindex="-1"></a><span class="cf">if</span> <span class="st">"CatBoost"</span> <span class="kw">in</span> preds:</span>
@@ -7251,7 +7251,7 @@ Keras artifact kind: latest</code></pre>
 </div>
 </div>
 <p><strong>FT-Transformer Diagnostics</strong></p>
-<div id="59b0a211" class="cell" data-execution_count="46">
+<div id="40966ae3" class="cell" data-execution_count="46">
 <details class="code-fold">
 <summary>FT-Transformer: predicted vs actual, residuals, absolute error (unclipped + clipped)</summary>
 <div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb69"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb69-1"><a href="#cb69-1" aria-hidden="true" tabindex="-1"></a><span class="cf">if</span> <span class="st">"Keras"</span> <span class="kw">in</span> preds:</span>
@@ -7338,7 +7338,7 @@ Keras artifact kind: latest</code></pre>
 </div>
 <p><strong>Cross-Model Prediction Comparison</strong></p>
 <p>These plots compare the raw predictions of each model pair. Points along the diagonal indicate agreement; systematic deviations reveal where models diverge.</p>
-<div id="bd35761f" class="cell" data-execution_count="47">
+<div id="91a18612" class="cell" data-execution_count="47">
 <details class="code-fold">
 <summary>Pred vs pred for each model pair (unclipped + clipped)</summary>
 <div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb70"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb70-1"><a href="#cb70-1" aria-hidden="true" tabindex="-1"></a>model_names <span class="op">=</span> <span class="bu">list</span>(preds.keys())</span>
@@ -7942,40 +7942,40 @@ Keras artifact kind: latest</code></pre>
 <span id="cb71-36"><a href="#cb71-36" aria-hidden="true" tabindex="-1"></a></span>
 <span id="cb71-37"><a href="#cb71-37" aria-hidden="true" tabindex="-1"></a><span class="fu">### Objective</span></span>
 <span id="cb71-38"><a href="#cb71-38" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb71-39"><a href="#cb71-39" aria-hidden="true" tabindex="-1"></a>This project predicts used-car listing prices from structured vehicle attributes using three increasingly sophisticated modeling approaches. The objective is not only to minimize error but also to examine the balance between interpretability, feature engineering effort, and predictive performance on real-world tabular data.</span>
+<span id="cb71-39"><a href="#cb71-39" aria-hidden="true" tabindex="-1"></a>This project predicts used-car listing prices from structured vehicle attributes using three increasingly sophisticated modeling approaches. The goal while comparing these methods is to minimize the error, but also to examine the balance between interpretability, feature engineering effort, and evaluate predictive performance on real-world data.</span>
 <span id="cb71-40"><a href="#cb71-40" aria-hidden="true" tabindex="-1"></a></span>
 <span id="cb71-41"><a href="#cb71-41" aria-hidden="true" tabindex="-1"></a>::: {.callout-note title="Why This Matters"}</span>
-<span id="cb71-42"><a href="#cb71-42" aria-hidden="true" tabindex="-1"></a>Used-car pricing is a high-stakes, high-volume problem. Dealerships, online marketplaces, and lenders all need fast, accurate price estimates to set competitive listing prices, flag underpriced inventory for acquisition, detect overpriced listings, and underwrite auto loans. A model that predicts within ~$1,300 of the true price at the median — as CatBoost does here — is accurate enough to automate first-pass pricing, reduce the need for manual appraisals, and surface arbitrage opportunities across a portfolio of thousands of vehicles.</span>
+<span id="cb71-42"><a href="#cb71-42" aria-hidden="true" tabindex="-1"></a>Applying machine learning models to used car pricing can be an effective tool for dealerships, online marketplaces, and lenders to quickly and accurately set competitive listing prices, flag underpriced inventory for acquisition, detect overpriced listings, and underwrite auto loans. A model that predicts within ~$1,300 of the true price at the median — as CatBoost does here — is accurate enough to automate first-pass pricing and reduce the need for manual appraisals. Further development of this model through incorporating additional features and ensemble methods could reduce the median margin of error even more and improve production readiness.</span>
 <span id="cb71-43"><a href="#cb71-43" aria-hidden="true" tabindex="-1"></a>:::</span>
 <span id="cb71-44"><a href="#cb71-44" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb71-45"><a href="#cb71-45" aria-hidden="true" tabindex="-1"></a>The final selected model is **CatBoost**, which achieved the best generalization performance across all metrics, required the least hyperparameter tuning, and produced the most stable predictions across the full price range.</span>
+<span id="cb71-45"><a href="#cb71-45" aria-hidden="true" tabindex="-1"></a><span class="fu">### Dataset</span></span>
 <span id="cb71-46"><a href="#cb71-46" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb71-47"><a href="#cb71-47" aria-hidden="true" tabindex="-1"></a><span class="fu">### Dataset</span></span>
+<span id="cb71-47"><a href="#cb71-47" aria-hidden="true" tabindex="-1"></a>The dataset comes from the Kaggle <span class="co">[</span><span class="ot">Used Cars Dataset</span><span class="co">](https://www.kaggle.com/datasets/andreinovikov/used-cars-dataset)</span> by andreinovikov, containing ~762k used-car listings with 20 attributes, including vehicle specs, seller information, and pricing. After cleaning and restricting to fully observed records, 243,500 listings remained for modeling.</span>
 <span id="cb71-48"><a href="#cb71-48" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb71-49"><a href="#cb71-49" aria-hidden="true" tabindex="-1"></a>The dataset comes from the Kaggle <span class="co">[</span><span class="ot">Used Cars Dataset</span><span class="co">](https://www.kaggle.com/datasets/andreinovikov/used-cars-dataset)</span> by andreinovikov, containing ~762k used-car listings with 20 attributes, including vehicle specs, seller information, and pricing. After cleaning and restricting to fully observed records, 243,500 listings remained for modeling.</span>
+<span id="cb71-49"><a href="#cb71-49" aria-hidden="true" tabindex="-1"></a><span class="fu">### Modeling Strategy</span></span>
 <span id="cb71-50"><a href="#cb71-50" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb71-51"><a href="#cb71-51" aria-hidden="true" tabindex="-1"></a><span class="fu">### Modeling Strategy</span></span>
+<span id="cb71-51"><a href="#cb71-51" aria-hidden="true" tabindex="-1"></a>Three models were implemented to explore different modeling paradigms:</span>
 <span id="cb71-52"><a href="#cb71-52" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb71-53"><a href="#cb71-53" aria-hidden="true" tabindex="-1"></a>Three models were implemented to explore different modeling paradigms:</span>
-<span id="cb71-54"><a href="#cb71-54" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb71-55"><a href="#cb71-55" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**Ridge regression** — a linear baseline that establishes a performance floor and quantifies how far a simple additive model can go on the engineered feature set.</span>
-<span id="cb71-56"><a href="#cb71-56" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**CatBoost** — a gradient-boosted tree model designed for categorical-heavy tabular data. Selected as the **final production model** based on superior test-set performance.</span>
-<span id="cb71-57"><a href="#cb71-57" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**FT-Transformer (Keras)** — a deep learning architecture with learned embeddings for categorical features, included as evidence of advanced experimentation rather than as the production pick.</span>
+<span id="cb71-53"><a href="#cb71-53" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**Ridge regression** — a linear baseline that establishes a performance floor and quantifies how far a simple additive model can go on the engineered feature set.</span>
+<span id="cb71-54"><a href="#cb71-54" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**CatBoost** — a gradient-boosted tree model designed for categorical-heavy tabular data. Selected as the **final production model** based on superior test-set performance.</span>
+<span id="cb71-55"><a href="#cb71-55" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>**FT-Transformer (Keras)** — a deep learning architecture with learned embeddings for categorical features, included as evidence of advanced experimentation rather than as the production pick.</span>
+<span id="cb71-56"><a href="#cb71-56" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb71-57"><a href="#cb71-57" aria-hidden="true" tabindex="-1"></a>This model progression enables direct comparison between classical machine learning and deep learning approaches using the same features and train/validation/test split.</span>
 <span id="cb71-58"><a href="#cb71-58" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb71-59"><a href="#cb71-59" aria-hidden="true" tabindex="-1"></a>This model progression enables direct comparison between classical machine learning and deep learning approaches using the same features and train/validation/test split.</span>
+<span id="cb71-59"><a href="#cb71-59" aria-hidden="true" tabindex="-1"></a><span class="fu">### Model Comparison Summary</span></span>
 <span id="cb71-60"><a href="#cb71-60" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb71-61"><a href="#cb71-61" aria-hidden="true" tabindex="-1"></a><span class="fu">### Model Comparison Summary</span></span>
-<span id="cb71-62"><a href="#cb71-62" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb71-63"><a href="#cb71-63" aria-hidden="true" tabindex="-1"></a><span class="pp">|</span> Metric <span class="pp">|</span> Ridge <span class="pp">|</span> CatBoost <span class="pp">|</span> FT-Transformer <span class="pp">|</span></span>
-<span id="cb71-64"><a href="#cb71-64" aria-hidden="true" tabindex="-1"></a><span class="pp">|---|---|---|---|</span></span>
-<span id="cb71-65"><a href="#cb71-65" aria-hidden="true" tabindex="-1"></a><span class="pp">|</span> **Test RMSE (full)** | $7,824 | **$3,935** <span class="pp">|</span> $4,255 <span class="pp">|</span></span>
-<span id="cb71-66"><a href="#cb71-66" aria-hidden="true" tabindex="-1"></a><span class="pp">|</span> **Test MAE (full)** | $3,011 | **$1,916** <span class="pp">|</span> $1,934 <span class="pp">|</span></span>
-<span id="cb71-67"><a href="#cb71-67" aria-hidden="true" tabindex="-1"></a><span class="pp">|</span> **Test MedianAE (full)** | $1,759 | **$1,280** <span class="pp">|</span> $1,305 <span class="pp">|</span></span>
-<span id="cb71-68"><a href="#cb71-68" aria-hidden="true" tabindex="-1"></a><span class="pp">|</span> Test RMSE (clipped 1–99%) <span class="pp">|</span> $4,211 <span class="pp">|</span> **$2,665** <span class="pp">|</span> $2,677 <span class="pp">|</span></span>
-<span id="cb71-69"><a href="#cb71-69" aria-hidden="true" tabindex="-1"></a><span class="pp">|</span> Test MAE (clipped 1–99%) <span class="pp">|</span> $2,653 <span class="pp">|</span> **$1,782** <span class="pp">|</span> $1,800 <span class="pp">|</span></span>
-<span id="cb71-70"><a href="#cb71-70" aria-hidden="true" tabindex="-1"></a><span class="pp">|</span> Test MedianAE (clipped 1–99%) <span class="pp">|</span> $1,736 <span class="pp">|</span> **$1,267** <span class="pp">|</span> $1,291 <span class="pp">|</span></span>
+<span id="cb71-61"><a href="#cb71-61" aria-hidden="true" tabindex="-1"></a><span class="pp">|</span> Metric <span class="pp">|</span> Ridge <span class="pp">|</span> CatBoost <span class="pp">|</span> FT-Transformer <span class="pp">|</span></span>
+<span id="cb71-62"><a href="#cb71-62" aria-hidden="true" tabindex="-1"></a><span class="pp">|---|---|---|---|</span></span>
+<span id="cb71-63"><a href="#cb71-63" aria-hidden="true" tabindex="-1"></a><span class="pp">|</span> **Test RMSE (full)** | $7,824 | **$3,935** <span class="pp">|</span> $4,255 <span class="pp">|</span></span>
+<span id="cb71-64"><a href="#cb71-64" aria-hidden="true" tabindex="-1"></a><span class="pp">|</span> **Test MAE (full)** | $3,011 | **$1,916** <span class="pp">|</span> $1,934 <span class="pp">|</span></span>
+<span id="cb71-65"><a href="#cb71-65" aria-hidden="true" tabindex="-1"></a><span class="pp">|</span> **Test MedianAE (full)** | $1,759 | **$1,280** <span class="pp">|</span> $1,305 <span class="pp">|</span></span>
+<span id="cb71-66"><a href="#cb71-66" aria-hidden="true" tabindex="-1"></a><span class="pp">|</span> Test RMSE (clipped 1–99%) <span class="pp">|</span> $4,211 <span class="pp">|</span> **$2,665** <span class="pp">|</span> $2,677 <span class="pp">|</span></span>
+<span id="cb71-67"><a href="#cb71-67" aria-hidden="true" tabindex="-1"></a><span class="pp">|</span> Test MAE (clipped 1–99%) <span class="pp">|</span> $2,653 <span class="pp">|</span> **$1,782** <span class="pp">|</span> $1,800 <span class="pp">|</span></span>
+<span id="cb71-68"><a href="#cb71-68" aria-hidden="true" tabindex="-1"></a><span class="pp">|</span> Test MedianAE (clipped 1–99%) <span class="pp">|</span> $1,736 <span class="pp">|</span> **$1,267** <span class="pp">|</span> $1,291 <span class="pp">|</span></span>
+<span id="cb71-69"><a href="#cb71-69" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb71-70"><a href="#cb71-70" aria-hidden="true" tabindex="-1"></a>CatBoost outperforms Ridge by roughly 50% across every metric and edges out the FT-Transformer by a meaningful margin, particularly on full-distribution RMSE, where sensitivity to rare high-value vehicles amplifies differences.</span>
 <span id="cb71-71"><a href="#cb71-71" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb71-72"><a href="#cb71-72" aria-hidden="true" tabindex="-1"></a>CatBoost outperforms Ridge by roughly 50% across every metric and edges out the FT-Transformer by a meaningful margin, particularly on full-distribution RMSE, where sensitivity to rare high-value vehicles amplifies differences.</span>
+<span id="cb71-72"><a href="#cb71-72" aria-hidden="true" tabindex="-1"></a>Ultimately, the **CatBoost** model achieved the best generalization performance across all metrics, required the least hyperparameter tuning, and produced the most stable predictions across the full price range.</span>
 <span id="cb71-73"><a href="#cb71-73" aria-hidden="true" tabindex="-1"></a></span>
 <span id="cb71-74"><a href="#cb71-74" aria-hidden="true" tabindex="-1"></a><span class="fu">### Key Predictive Features</span></span>
 <span id="cb71-75"><a href="#cb71-75" aria-hidden="true" tabindex="-1"></a></span>
@@ -10924,7 +10924,7 @@ Keras artifact kind: latest</code></pre>
 <span id="cb71-3084"><a href="#cb71-3084" aria-hidden="true" tabindex="-1"></a></span>
 <span id="cb71-3085"><a href="#cb71-3085" aria-hidden="true" tabindex="-1"></a>**Training process**: Hyperparameters were selected using the training split with cross-validation via a staged grid search to balance performance and computational cost. A validation split was then used for early stopping to automatically select the optimal ensemble size. After model selection was finalized, the final model was refit on the combined train+validation data and evaluated on the held-out test set.</span>
 <span id="cb71-3086"><a href="#cb71-3086" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb71-3087"><a href="#cb71-3087" aria-hidden="true" tabindex="-1"></a>**Performance**: CatBoost cuts Ridge's test MAE roughly in half ($1,916 vs. $3,011) and reduces RMSE by nearly 50% ($3,935 vs. $7,824). The clipped test RMSE of $2,665 means that for the vast majority of vehicles, predictions are within ~$2,700 of the actual price — well within the normal range of market variability for used cars.</span>
+<span id="cb71-3087"><a href="#cb71-3087" aria-hidden="true" tabindex="-1"></a>**Performance**: CatBoost cuts Ridge's test MAE by over $1,000 ($1,916 vs. $3,011) and reduces RMSE by nearly 50% ($3,935 vs. $7,824). The clipped test RMSE of $2,665 means that for the vast majority of vehicles, predictions are within ~$2,700 of the actual price — well within the normal range of market variability for used cars.</span>
 <span id="cb71-3088"><a href="#cb71-3088" aria-hidden="true" tabindex="-1"></a></span>
 <span id="cb71-3089"><a href="#cb71-3089" aria-hidden="true" tabindex="-1"></a>**Feature importance highlights**: CatBoost's built-in feature importance reveals that <span class="in">`age`</span> (19.0%) and <span class="in">`mileage`</span> (14.3%) are the dominant predictors, followed by <span class="in">`model`</span> (11.0%) and <span class="in">`manufacturer`</span> (9.4%). This aligns with domain knowledge — depreciation (age + mileage) is the primary driver of used-car pricing, while make and model capture brand and segment effects.</span>
 <span id="cb71-3090"><a href="#cb71-3090" aria-hidden="true" tabindex="-1"></a></span>
@@ -12872,7 +12872,7 @@ Keras artifact kind: latest</code></pre>
 <span id="cb71-5046"><a href="#cb71-5046" aria-hidden="true" tabindex="-1"></a></span>
 <span id="cb71-5047"><a href="#cb71-5047" aria-hidden="true" tabindex="-1"></a><span class="fu">#### FT-Transformer Interpretation</span></span>
 <span id="cb71-5048"><a href="#cb71-5048" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb71-5049"><a href="#cb71-5049" aria-hidden="true" tabindex="-1"></a>The FT-Transformer was included as evidence of advanced experimentation with deep learning on tabular data, not necessarily as the production pick.</span>
+<span id="cb71-5049"><a href="#cb71-5049" aria-hidden="true" tabindex="-1"></a>The FT-Transformer was included as evidence of advanced experimentation with deep learning on tabular data, but was ultimately outperformed by CatBoost on metrics and operability.</span>
 <span id="cb71-5050"><a href="#cb71-5050" aria-hidden="true" tabindex="-1"></a></span>
 <span id="cb71-5051"><a href="#cb71-5051" aria-hidden="true" tabindex="-1"></a>**Architecture**: The model uses learned embeddings for each categorical feature and a Transformer-style attention mechanism to capture feature interactions. This is a more modern approach than simple dense networks for tabular data.</span>
 <span id="cb71-5052"><a href="#cb71-5052" aria-hidden="true" tabindex="-1"></a></span>

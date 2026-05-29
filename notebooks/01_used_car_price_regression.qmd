@@ -36,13 +36,11 @@ execute:
 
 ### Objective
 
-This project predicts used-car listing prices from structured vehicle attributes using three increasingly sophisticated modeling approaches. The objective is not only to minimize error but also to examine the balance between interpretability, feature engineering effort, and predictive performance on real-world tabular data.
+This project predicts used-car listing prices from structured vehicle attributes using three increasingly sophisticated modeling approaches. The goal while comparing these methods is to minimize the error, but also to examine the balance between interpretability, feature engineering effort, and evaluate predictive performance on real-world data.
 
 ::: {.callout-note title="Why This Matters"}
-Used-car pricing is a high-stakes, high-volume problem. Dealerships, online marketplaces, and lenders all need fast, accurate price estimates to set competitive listing prices, flag underpriced inventory for acquisition, detect overpriced listings, and underwrite auto loans. A model that predicts within ~$1,300 of the true price at the median — as CatBoost does here — is accurate enough to automate first-pass pricing, reduce the need for manual appraisals, and surface arbitrage opportunities across a portfolio of thousands of vehicles.
+Applying machine learning models to used car pricing can be an effective tool for dealerships, online marketplaces, and lenders to quickly and accurately set competitive listing prices, flag underpriced inventory for acquisition, detect overpriced listings, and underwrite auto loans. A model that predicts within ~$1,300 of the true price at the median — as CatBoost does here — is accurate enough to automate first-pass pricing and reduce the need for manual appraisals. Further development of this model through incorporating additional features and ensemble methods could reduce the median margin of error even more and improve production readiness.
 :::
-
-The final selected model is **CatBoost**, which achieved the best generalization performance across all metrics, required the least hyperparameter tuning, and produced the most stable predictions across the full price range.
 
 ### Dataset
 
@@ -70,6 +68,8 @@ This model progression enables direct comparison between classical machine learn
 | Test MedianAE (clipped 1–99%) | $1,736 | **$1,267** | $1,291 |
 
 CatBoost outperforms Ridge by roughly 50% across every metric and edges out the FT-Transformer by a meaningful margin, particularly on full-distribution RMSE, where sensitivity to rare high-value vehicles amplifies differences.
+
+Ultimately, the **CatBoost** model achieved the best generalization performance across all metrics, required the least hyperparameter tuning, and produced the most stable predictions across the full price range.
 
 ### Key Predictive Features
 
@@ -3018,7 +3018,7 @@ CatBoost is the **selected final model** for this project, achieving the best pe
 
 **Training process**: Hyperparameters were selected using the training split with cross-validation via a staged grid search to balance performance and computational cost. A validation split was then used for early stopping to automatically select the optimal ensemble size. After model selection was finalized, the final model was refit on the combined train+validation data and evaluated on the held-out test set.
 
-**Performance**: CatBoost cuts Ridge's test MAE roughly in half ($1,916 vs. $3,011) and reduces RMSE by nearly 50% ($3,935 vs. $7,824). The clipped test RMSE of $2,665 means that for the vast majority of vehicles, predictions are within ~$2,700 of the actual price — well within the normal range of market variability for used cars.
+**Performance**: CatBoost cuts Ridge's test MAE by over $1,000 ($1,916 vs. $3,011) and reduces RMSE by nearly 50% ($3,935 vs. $7,824). The clipped test RMSE of $2,665 means that for the vast majority of vehicles, predictions are within ~$2,700 of the actual price — well within the normal range of market variability for used cars.
 
 **Feature importance highlights**: CatBoost's built-in feature importance reveals that `age` (19.0%) and `mileage` (14.3%) are the dominant predictors, followed by `model` (11.0%) and `manufacturer` (9.4%). This aligns with domain knowledge — depreciation (age + mileage) is the primary driver of used-car pricing, while make and model capture brand and segment effects.
 
@@ -4966,7 +4966,7 @@ else:
 
 #### FT-Transformer Interpretation
 
-The FT-Transformer was included as evidence of advanced experimentation with deep learning on tabular data, not necessarily as the production pick.
+The FT-Transformer was included as evidence of advanced experimentation with deep learning on tabular data, but was ultimately outperformed by CatBoost on metrics and operability.
 
 **Architecture**: The model uses learned embeddings for each categorical feature and a Transformer-style attention mechanism to capture feature interactions. This is a more modern approach than simple dense networks for tabular data.
 
