@@ -17,9 +17,9 @@
 
 ## Overview
 
-This project predicts used-car listing prices from 20 vehicle attributes using three progressively complex modeling approaches — from an interpretable linear baseline through gradient-boosted trees to a deep learning transformer. The goal is not simply to minimize error, but to evaluate the practical tradeoffs between interpretability, feature engineering effort, and predictive performance on real-world tabular data.
+This project predicts used-car listing prices from 20 vehicle attributes using three progressively complex modeling approaches, from an interpretable linear baseline through gradient-boosted trees to a deep learning transformer. The goal while comparing these methods is to minimize the error, but also to examine the balance between interpretability, feature engineering effort, and evaluate predictive performance on real-world data.
 
-**The final model (CatBoost) predicts within ~$1,300 of the true listing price at the median**, across 29 manufacturers and 5,613 model variants — accurate enough to automate first-pass pricing, reduce manual appraisals, and surface arbitrage opportunities for dealerships, online marketplaces, and auto lenders.
+**The final model (CatBoost) predicts within ~$1,300 of the true listing price at the median**, across 29 manufacturers and 5,613 model variants, accurate enough to automate first-pass pricing, reduce manual appraisals, and surface arbitrage opportunities for dealerships, online marketplaces, and auto lenders.
 
 ---
 
@@ -48,11 +48,11 @@ Used-car pricing is a high-stakes, high-volume problem. Dealerships, online mark
 
 **Feature engineering was essential across all model classes.** Collapsing 1,808 raw engine strings into five structured features, normalizing 221 transmission variants into type and gear count, and engineering domain-informed interactions (e.g., luxury-brand depreciation curves) gave all three models a clean, informative feature set. Even CatBoost relied heavily on these engineered features among its top predictors.
 
-**CatBoost's native categorical handling is a structural advantage.** With 5,613 unique models and 1,808 unique engine strings, CatBoost avoids the dimensionality explosion of one-hot encoding (972 dummy columns for Ridge) while capturing nonlinear interactions — like the relationship between vehicle age, luxury status, and price — without explicit interaction terms.
+**CatBoost's native categorical handling is a structural advantage.** With 5,613 unique models and 1,808 unique engine strings, CatBoost avoids the dimensionality explosion of one-hot encoding (972 dummy columns for Ridge) while capturing nonlinear interactions (like the relationship between vehicle age, luxury status, and price) without explicit interaction terms.
 
 **Deep learning is competitive but not dominant on tabular data.** The FT-Transformer came within ~$20 of CatBoost on clipped MAE, confirming that learned embeddings capture meaningful structure. But CatBoost's lower tuning burden, built-in regularization, and robustness across the full price range make it the practical production choice.
 
-**Luxury vehicles are the hardest to price accurately.** All three models show increasing error above ~$100k, likely because luxury pricing depends on factors not in the dataset — trim levels, option packages, and collector-market dynamics.
+**Luxury vehicles are the hardest to price accurately.** All three models show increasing error above ~$100k, likely because luxury pricing depends on factors not in the dataset, such as trim levels, option packages, and collector-market dynamics.
 
 ---
 
